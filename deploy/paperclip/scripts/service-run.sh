@@ -1,7 +1,9 @@
 #!/bin/sh
-# Entry point for the Paperclip LaunchAgent. Installed by
-# scripts/install-service.sh, which rewrites the generated plist to call this
-# instead of `paperclipai run` directly.
+# Entry point for the Paperclip service, run either by hand or by a
+# supervisor. Historically installed by patching the generated launchd
+# plist (removed — see git history); now execed directly by the
+# home-manager launchd agent (../../flake.nix / ../../nix/home-manager-module.nix)
+# with no plist rewriting involved.
 #
 # It exists because a launchd agent inherits almost nothing: not the login
 # shell's PATH, and not paperclip.env. Without this wrapper the service starts
@@ -9,14 +11,28 @@
 # PAPERCLIP_SETTING_DEFAULTS and PAPERCLIP_HIDDEN_SETTINGS, which are the
 # feedback-trace-sharing floor and have no config.json equivalent. The
 # instance would come up looking healthy with that floor silently absent.
+#
+# Env file location: defaults to paperclip.env next to this script (a
+# checkout), but honors PAPERCLIP_ENV_FILE if set. The home-manager module
+# sets it explicitly (its `environmentFile` option) because the flake-packaged
+# copy of this script runs from the Nix store, not from a checkout — this is
+# the same file either way, so the hand-run path and the service path cannot
+# drift from each other.
 
 set -eu
 
-cd "$(dirname "$0")/.."
+script_dir="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
+default_deploy_dir="$(CDPATH='' cd -- "$script_dir/.." && pwd)"
+env_file="${PAPERCLIP_ENV_FILE:-$default_deploy_dir/paperclip.env}"
+
+if [ ! -f "$env_file" ]; then
+  echo "error: $env_file is missing. Set PAPERCLIP_ENV_FILE, or run this from a checkout with paperclip.env in place (see README.md)." >&2
+  exit 1
+fi
 
 set -a
 # shellcheck disable=SC1091
-. ./paperclip.env
+. "$env_file"
 set +a
 
 # launchd's PATH does not include Homebrew, so `tailscale` is not findable and
