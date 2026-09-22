@@ -96,8 +96,12 @@
       # A home-manager module, not a nix-darwin module: home-manager's own
       # `launchd.agents` handles user-session launchd agents on darwin
       # without needing nix-darwin. See nix/home-manager-module.nix.
-      homeManagerModules.paperclip = import ./nix/home-manager-module.nix { inherit self; };
-      homeManagerModules.default = self.homeManagerModules.paperclip;
+      # `homeModules`, not `homeManagerModules`: nix treats the latter as an
+      # unknown output and skips it, so `nix flake check` would never look
+      # at the module at all. No alias — nothing consumes the old name yet,
+      # and an aliased output reintroduces the unchecked one.
+      homeModules.paperclip = import ./nix/home-manager-module.nix { inherit self; };
+      homeModules.default = self.homeModules.paperclip;
 
       checks = forAllSystems (
         system:

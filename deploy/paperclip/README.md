@@ -278,7 +278,7 @@ repository — Ian's dotfiles flake on the work laptop, above all:
 - `packages.<system>.paperclip-posture-check` — `posture/posture-check.mjs`
   plus a `node` wrapper, satisfying "verifying the instance does not depend
   on knowing where in the repository the checker lives."
-- `homeManagerModules.paperclip` (also `.default`) — the module that
+- `homeModules.paperclip` (also `.default`) — the module that
   supervises Paperclip as a macOS launchd agent. See
   `../../nix/home-manager-module.nix` for its options and their
   descriptions; `environmentFile` (pointing at this machine's
@@ -303,7 +303,7 @@ home-manager agent exists, or falling back to `scripts/service-run.sh` in
 the foreground if it does not.
 
 The dotfiles side (pinning this flake as an input, enabling
-`homeManagerModules.paperclip`, setting its options) is a separate ticket
+`homeModules.paperclip`, setting its options) is a separate ticket
 and is not written here. What is guaranteed from this side: a consumer needs
 only the flake reference, `environmentFile`, and (optionally) `instanceId`,
 `port`, `extraPath`, `logDirectory` — no copied scripts, no path into this
@@ -319,7 +319,7 @@ nix flake lock                     # first time only, needs network access
 nix flake check                    # expect: no errors; runs the posture unit tests too
 nix build .#paperclip-cli .#paperclip-service-run .#paperclip-posture-check
 ./result/bin/paperclip-posture-check --help   # or any of the three built binaries
-nix eval .#homeManagerModules.paperclip.options.services.paperclip.enable.description
+nix eval .#homeModules.paperclip.options.services.paperclip.enable.description
 ```
 
 Expect `nix flake check` to pass and each `nix build` to produce a `result`

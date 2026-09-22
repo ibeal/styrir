@@ -8,7 +8,7 @@
 > `flake.nix` exposes that deployment to consumers with no checkout of this
 > repository: the executables it provides (`packages.<system>.paperclip-cli`,
 > `paperclip-service-run`, `paperclip-posture-check`) and a home-manager
-> module (`homeManagerModules.paperclip`) that supervises Paperclip as a
+> module (`homeModules.paperclip`) that supervises Paperclip as a
 > macOS launchd agent. See `deploy/paperclip/README.md` → "The flake" and
 > `nix/home-manager-module.nix`.
 
