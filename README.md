@@ -1,5 +1,10 @@
 # Styrir
 
+> The `deploy/paperclip/` directory holds the self-hosted Paperclip deployment
+> (slice 1 of the adoption ticket) that will eventually be bridged to this
+> dispatcher's replacement. See `deploy/paperclip/README.md`. The dispatcher
+> below is being replaced (slice 3); it is left in place here, not extended.
+
 Styrir is a configurable local command dispatcher. It has no built-in queue provider, workflow engine, or Restate integration.
 
 ## Service

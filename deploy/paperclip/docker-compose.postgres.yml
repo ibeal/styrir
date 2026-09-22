@@ -1,0 +1,37 @@
+# Standalone PostgreSQL for the self-hosted Paperclip instance.
+#
+# This is deliberately the *only* container in this deployment. Paperclip
+# itself runs on the host (see README.md) because "bind: tailnet" needs to
+# see the host's real Tailscale interface, which a container cannot do
+# reliably on macOS/Docker Desktop. Only the database — which nothing outside
+# this machine needs to reach — is containerized.
+#
+# The published port is bound to 127.0.0.1 explicitly. Docker Desktop on
+# macOS publishes to all host interfaces by default when no address is
+# given, which would put the database on the tailnet. Binding to loopback
+# keeps "reachable from nowhere else" true for the database even though the
+# host as a whole is tailnet-reachable for the Paperclip UI.
+#
+# Secrets (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB) come from
+# ./postgres.env, which is git-ignored. Copy postgres.env.example to
+# postgres.env and fill it in before running `docker compose up`.
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: paperclip-postgres
+    restart: unless-stopped
+    env_file:
+      - ./postgres.env
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - paperclip-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  paperclip-pgdata:

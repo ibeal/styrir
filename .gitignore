@@ -1,2 +1,7 @@
 /target
 /tmp
+
+# Paperclip deployment secrets (uncommitted local env files; see
+# deploy/paperclip/README.md for what the laptop must supply).
+/deploy/paperclip/postgres.env
+/deploy/paperclip/paperclip.env

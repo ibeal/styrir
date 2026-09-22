@@ -1,0 +1,16 @@
+# Pinned upstream Paperclip version.
+#
+# This file is intentionally a placeholder: the sandbox this deployment
+# layer was authored in has no network access to the npm registry or
+# GitHub, so no real release version could be resolved or verified here.
+#
+# During first bring-up on the laptop (README.md "Bring-up, step by step"),
+# run:
+#
+#   npx --registry https://registry.npmjs.org paperclipai install
+#   paperclipai doctor    # prints the resolved installed version
+#
+# then replace the line below with that exact version and commit it, so
+# every later `scripts/up.sh` and the upgrade procedure pin to a known-good
+# release instead of silently floating to "latest".
+PAPERCLIP_VERSION=UNPINNED-FILL-IN-DURING-FIRST-BRING-UP
