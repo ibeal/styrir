@@ -30,8 +30,11 @@ if [ "${PAPERCLIP_VERSION:-}" = "UNPINNED-FILL-IN-DURING-FIRST-BRING-UP" ] || [ 
   exit 1
 fi
 
+# --env-file, not just env_file: `env_file` in the compose file supplies the
+# container's environment but is not read for ${...} interpolation, so
+# POSTGRES_HOST_PORT would silently fall back to its default without this.
 echo "==> starting standalone PostgreSQL"
-docker compose -f docker-compose.postgres.yml up -d
+docker compose --env-file postgres.env -f docker-compose.postgres.yml up -d
 
 echo "==> waiting for PostgreSQL healthcheck"
 for _ in $(seq 1 30); do
@@ -46,11 +49,17 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
-echo "==> starting/restarting the Paperclip host service"
-set -a
-# shellcheck disable=SC1091
-. ./paperclip.env
-set +a
-paperclipai service restart || paperclipai service start
+# Supervision of the Paperclip process belongs to the home-manager launchd
+# agent (dotfiles), which invokes scripts/service-run.sh. This script only
+# kicks it; it never installs or patches a plist.
+service_label="ing.paperclip.paperclipai"
+if launchctl print "gui/$(id -u)/${service_label}" >/dev/null 2>&1; then
+  echo "==> restarting the Paperclip launchd agent"
+  launchctl kickstart -k "gui/$(id -u)/${service_label}"
+else
+  echo "==> no Paperclip launchd agent is installed."
+  echo "    Apply the home-manager configuration that declares it, or for a"
+  echo "    foreground instance run: sh scripts/service-run.sh"
+fi
 
-echo "==> done. Run scripts/posture-check.sh next to verify the running instance."
+echo "==> done. Verify with: node posture/posture-check.mjs (see README.md)."

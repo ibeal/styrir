@@ -92,17 +92,19 @@ Two independent things must both survive a restart:
   Desktop → Settings → General → "Start Docker Desktop when you log in").
   `docker-compose.postgres.yml`'s `restart: unless-stopped` then brings the
   container back once the daemon is up.
-- **Paperclip**: `paperclipai onboard --install-service` (or
-  `paperclipai service install`) installs a macOS LaunchAgent with
-  `RunAtLoad`/`KeepAlive`. A LaunchAgent runs in a user session, so it
-  starts once Ian logs into the laptop, not at raw boot before login. That
-  is a laptop constraint, not a Paperclip one — the instance holds no
-  content the LaunchAgent needs to unlock before login, only Ian's own
-  session gates it.
+- **Paperclip**: a launchd agent declared in **home-manager** (dotfiles),
+  not `paperclipai service install`. The generated plist carries neither a
+  usable PATH nor this deployment's environment, so under it `tailscale` is
+  unfindable (bind=tailnet refuses to start) and, worse, the env-only
+  feedback-sharing floor is silently absent. The home-manager agent invokes
+  `scripts/service-run.sh` from this directory, which sources
+  `paperclip.env`, resolves the tailnet address, and execs the server.
+  A LaunchAgent runs in a user session, so it starts once Ian logs into the
+  laptop, not at raw boot before login.
 
 Run `scripts/up.sh` once after that initial setup; afterwards a machine
 restart alone is enough, as long as Docker Desktop's login item and the
-LaunchAgent are both installed as above.
+home-manager agent are both in place.
 
 ## Tailnet access, and nowhere else
 
