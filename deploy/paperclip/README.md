@@ -92,17 +92,19 @@ Two independent things must both survive a restart:
   Desktop → Settings → General → "Start Docker Desktop when you log in").
   `docker-compose.postgres.yml`'s `restart: unless-stopped` then brings the
   container back once the daemon is up.
-- **Paperclip**: `paperclipai onboard --install-service` (or
-  `paperclipai service install`) installs a macOS LaunchAgent with
-  `RunAtLoad`/`KeepAlive`. A LaunchAgent runs in a user session, so it
-  starts once Ian logs into the laptop, not at raw boot before login. That
-  is a laptop constraint, not a Paperclip one — the instance holds no
-  content the LaunchAgent needs to unlock before login, only Ian's own
-  session gates it.
+- **Paperclip**: a launchd agent declared in **home-manager** (dotfiles),
+  not `paperclipai service install`. The generated plist carries neither a
+  usable PATH nor this deployment's environment, so under it `tailscale` is
+  unfindable (bind=tailnet refuses to start) and, worse, the env-only
+  feedback-sharing floor is silently absent. The home-manager agent invokes
+  `scripts/service-run.sh` from this directory, which sources
+  `paperclip.env`, resolves the tailnet address, and execs the server.
+  A LaunchAgent runs in a user session, so it starts once Ian logs into the
+  laptop, not at raw boot before login.
 
 Run `scripts/up.sh` once after that initial setup; afterwards a machine
 restart alone is enough, as long as Docker Desktop's login item and the
-LaunchAgent are both installed as above.
+home-manager agent are both in place.
 
 ## Tailnet access, and nowhere else
 
@@ -260,6 +262,83 @@ Run the unit tests:
 
 ```sh
 node --test posture/*.test.mjs
+```
+
+## The flake
+
+This repository's top-level `flake.nix` is the delivery mechanism for
+everything below this line, for a consumer who has no checkout of this
+repository — Ian's dotfiles flake on the work laptop, above all:
+
+- `packages.<system>.paperclip-cli` — `scripts/pc.sh`, unchanged in
+  behavior, packaged so it runs without a checkout.
+- `packages.<system>.paperclip-service-run` — `scripts/service-run.sh`,
+  likewise. This is what the home-manager module below execs; it is not a
+  separate reimplementation of it.
+- `packages.<system>.paperclip-posture-check` — `posture/posture-check.mjs`
+  plus a `node` wrapper, satisfying "verifying the instance does not depend
+  on knowing where in the repository the checker lives."
+- `homeModules.paperclip` (also `.default`) — the module that
+  supervises Paperclip as a macOS launchd agent. See
+  `../../nix/home-manager-module.nix` for its options and their
+  descriptions; `environmentFile` (pointing at this machine's
+  `paperclip.env`) is the one every consumer must set, and has no default —
+  enabling the module without it fails evaluation rather than starting
+  Paperclip with the lockdown partially applied.
+
+`scripts/pc.sh` and `scripts/service-run.sh` both honor a
+`PAPERCLIP_ENV_FILE` override (falling back to `paperclip.env` next to the
+script, i.e. this directory, when unset). That override is what lets the
+same two scripts run identically from a checkout (`scripts/up.sh`'s
+foreground fallback) and from the Nix store (the home-manager agent, which
+sets `PAPERCLIP_ENV_FILE` to its `environmentFile` option) — one code path,
+two callers, per the acceptance criteria. Nothing else about either script
+changed.
+
+Standalone PostgreSQL (`docker-compose.postgres.yml`) is **not** a flake
+output: it is still brought up from a checkout via `scripts/up.sh`, which
+also remains this repository's own front door for the Paperclip service —
+see its `README.md` note about restarting via `launchctl kickstart` once the
+home-manager agent exists, or falling back to `scripts/service-run.sh` in
+the foreground if it does not.
+
+The dotfiles side (pinning this flake as an input, enabling
+`homeModules.paperclip`, setting its options) is a separate ticket
+and is not written here. What is guaranteed from this side: a consumer needs
+only the flake reference, `environmentFile`, and (optionally) `instanceId`,
+`port`, `extraPath`, `logDirectory` — no copied scripts, no path into this
+repository, and no duplicated lockdown environment, because the module
+points at the same `paperclip.env` the hand-run scripts already read rather
+than re-declaring any of its settings in Nix.
+
+### Host verification (needs nix; not runnable in this sandbox)
+
+```sh
+# From the repository root, on the laptop:
+nix flake lock                     # first time only, needs network access
+nix flake check                    # expect: no errors; runs the posture unit tests too
+nix build .#paperclip-cli .#paperclip-service-run .#paperclip-posture-check
+./result/bin/paperclip-posture-check --help   # or any of the three built binaries
+nix eval .#homeModules.paperclip.options.services.paperclip.enable.description
+```
+
+Expect `nix flake check` to pass and each `nix build` to produce a `result`
+symlink with the named binary inside. There is no way to verify
+`launchd.agents` wiring itself without a real home-manager configuration
+enabling the module (the dotfiles ticket) and a `home-manager switch` —
+after that, verify with:
+
+```sh
+launchctl print gui/$(id -u)/org.styrir.paperclip   # expect: state = running
+tail -f ~/Library/Logs/paperclip/paperclip.out.log  # or wherever logDirectory points
+curl http://$(tailscale ip -4):3100/api/health       # expect: {"status":"ok"}
+```
+
+and confirm removal is clean by disabling the module, `home-manager switch`
+again, then:
+
+```sh
+launchctl print gui/$(id -u)/org.styrir.paperclip   # expect: no such process / not found
 ```
 
 ## Pinning and upgrading

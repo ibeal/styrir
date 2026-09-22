@@ -15,6 +15,10 @@
 # Secrets (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB) come from
 # ./postgres.env, which is git-ignored. Copy postgres.env.example to
 # postgres.env and fill it in before running `docker compose up`.
+#
+# POSTGRES_HOST_PORT below is interpolated by compose itself, which does not
+# read `env_file` for that. Always start this stack through scripts/up.sh, or
+# pass `--env-file postgres.env` by hand, or the override is ignored.
 
 services:
   postgres:

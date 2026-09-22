@@ -4,6 +4,13 @@
 > (slice 1 of the adoption ticket) that will eventually be bridged to this
 > dispatcher's replacement. See `deploy/paperclip/README.md`. The dispatcher
 > below is being replaced (slice 3); it is left in place here, not extended.
+>
+> `flake.nix` exposes that deployment to consumers with no checkout of this
+> repository: the executables it provides (`packages.<system>.paperclip-cli`,
+> `paperclip-service-run`, `paperclip-posture-check`) and a home-manager
+> module (`homeModules.paperclip`) that supervises Paperclip as a
+> macOS launchd agent. See `deploy/paperclip/README.md` → "The flake" and
+> `nix/home-manager-module.nix`.
 
 Styrir is a configurable local command dispatcher. It has no built-in queue provider, workflow engine, or Restate integration.
 
