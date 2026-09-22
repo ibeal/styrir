@@ -1,0 +1,22 @@
+{
+  "name": "styrir-hatchet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The personal SDLC (skald → heimr → gardr → review loop → merge) as Hatchet workflows.",
+  "scripts": {
+    "worker": "tsx src/worker.ts",
+    "start": "tsx src/cli.ts start",
+    "signal": "tsx src/cli.ts signal",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hatchet-dev/typescript-sdk": "^1.33.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

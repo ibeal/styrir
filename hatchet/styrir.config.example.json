@@ -1,0 +1,16 @@
+{
+  "maxReviewRounds": 3,
+  "maxBuildContinuations": 2,
+  "maxConcurrentSandboxes": 2,
+  "pollIntervalSeconds": 30,
+  "repos": {
+    "styrir": {
+      "checkout": "/Users/ian.beal/repos/styrir",
+      "pushUrl": "git@github.com:ibeal/styrir.git",
+      "trunk": "main",
+      "buildSpec": "styrir-building-v2",
+      "reviewSpec": "styrir-reviewing",
+      "verify": "cargo test && cargo clippy -- -D warnings"
+    }
+  }
+}

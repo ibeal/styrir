@@ -5,3 +5,8 @@
 # deploy/paperclip/README.md for what the laptop must supply).
 /deploy/paperclip/postgres.env
 /deploy/paperclip/paperclip.env
+
+# Hatchet worker: deps, local instance creds, machine-specific repo map.
+/hatchet/node_modules
+/hatchet/.env
+/hatchet/styrir.config.json
