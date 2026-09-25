@@ -17,8 +17,18 @@ export const ticketSignalSchema = z.object({
 });
 export type TicketSignal = z.infer<typeof ticketSignalSchema>;
 
+export const TICKET_PROGRESS_EVENT = 'sdlc:ticket';
+
+// A timeline entry on the Events page, filterable by ticketId. Fired from the durable body,
+// so a replay after eviction may repeat one; the timeline is for eyes, not for triggering.
+async function emit(ticketId: string, phase: string, detail: Record<string, unknown> = {}): Promise<void> {
+  await hatchet.events
+    .push(TICKET_PROGRESS_EVENT, { ticketId, phase, ...detail }, { additionalMetadata: { ticketId, phase } })
+    .catch(() => {});
+}
+
 export type TicketInput = { ticketId: string };
-export type TicketOutput = { ticketId: string; outcome: 'done' | 'cancelled' | 'paused'; reason: string | null };
+export type TicketOutput = { ticketId: string; outcome: 'done' | 'cancelled' | 'paused' | 'escalated'; reason: string | null };
 
 // One durable run per ticket for its whole building → reviewing → done life. It only
 // spawns children and waits, so it is safe to evict and replay at every checkpoint.
@@ -41,9 +51,12 @@ export const sdlcTicket = hatchet.durableTask({
       throw new NonRetryableError(`${ticketId} is paused: ${ticket.paused}`);
     }
 
+    await emit(ticketId, 'started', { status: ticket.status, repo: ticket.repo });
+
     const pause = async (reason: string): Promise<TicketOutput> => {
       await skaldSet.run({ ticketId, paused: reason });
       await skaldLog.run({ ticketId, entry: `hatchet: paused — ${reason}` });
+      await emit(ticketId, 'paused', { reason });
       return { ticketId, outcome: 'paused', reason };
     };
 
@@ -53,11 +66,16 @@ export const sdlcTicket = hatchet.durableTask({
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      await emit(ticketId, 'build', { round });
       const build = await buildPhase.run({ ticket, round, findings });
       buildWorkspacePath = build.workspacePath;
+      await emit(ticketId, build.escalated ? 'escalated' : build.ok ? 'built' : 'build-incomplete', { round, branch: build.branch, pr: build.pr, reason: build.reason });
+      if (build.escalated) return { ticketId, outcome: 'escalated', reason: build.reason };
       if (!build.ok) return pause(`build round ${round} incomplete after continuations: ${build.reason}`);
 
+      await emit(ticketId, 'review', { round });
       const review = await reviewPhase.run({ ticket, round, buildWorkspacePath });
+      await emit(ticketId, 'reviewed', { round, verdict: review.verdict, actionable: review.actionable.length });
       if (review.verdict === 'inconclusive') return pause(`review round ${round} left no usable handoff`);
       if (review.verdict === 'approve') break;
 
@@ -74,6 +92,7 @@ export const sdlcTicket = hatchet.durableTask({
       ticketId,
       entry: `hatchet: review clean after ${round} round(s). Awaiting \`styrir signal ${ticketId} merged|rework|cancel\`.`,
     });
+    await emit(ticketId, 'awaiting-signal', { round });
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -85,14 +104,17 @@ export const sdlcTicket = hatchet.durableTask({
         '1h',
       );
 
+      await emit(ticketId, 'signal', { action: signal.action, note: signal.note });
       if (signal.action === 'merged') {
         await skaldSet.run({ ticketId, status: 'done', paused: '' });
         await skaldLog.run({ ticketId, entry: `hatchet: merged${signal.note ? ` — ${signal.note}` : ''}` });
+        await emit(ticketId, 'done');
         return { ticketId, outcome: 'done', reason: null };
       }
       if (signal.action === 'cancel') {
         await skaldSet.run({ ticketId, status: 'cancelled', paused: '' });
         await skaldLog.run({ ticketId, entry: `hatchet: cancelled${signal.note ? ` — ${signal.note}` : ''}` });
+        await emit(ticketId, 'cancelled', { note: signal.note });
         return { ticketId, outcome: 'cancelled', reason: signal.note ?? null };
       }
 
@@ -104,6 +126,7 @@ export const sdlcTicket = hatchet.durableTask({
         round,
         findings: [{ severity: 'should-fix', description: signal.note ?? 'rework requested by Ian' }],
       });
+      if (build.escalated) return { ticketId, outcome: 'escalated', reason: build.reason };
       if (!build.ok) return pause(`rework round ${round} incomplete: ${build.reason}`);
       const review = await reviewPhase.run({ ticket, round, buildWorkspacePath: build.workspacePath });
       if (review.verdict !== 'approve') {

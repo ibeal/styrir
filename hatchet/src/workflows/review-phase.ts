@@ -49,7 +49,10 @@ export const reviewPhase = hatchet.durableTask({
     if (!handoff || handoff.status !== 'complete') verdict = 'inconclusive';
     else verdict = actionable.length ? 'request-changes' : 'approve';
 
-    const summary = handoff?.summary ?? `review run ${result.runId} left no complete handoff`;
+    const summary =
+      handoff?.summary ??
+      `review run ${result.runId} left no complete handoff` +
+        (result.stderrTail ? `\n\ngardr stderr:\n\`\`\`\n${result.stderrTail}\n\`\`\`` : '');
     await skaldLog.run({
       ticketId: ticket.id,
       entry:

@@ -1,8 +1,8 @@
 import type { JsonObject } from '@hatchet-dev/typescript-sdk';
 import { existsSync } from 'node:fs';
 import { hatchet } from '../client.js';
-import { run } from '../exec.js';
-import { repoConfig } from '../config.js';
+import { logged, run } from '../exec.js';
+import { repoConfig, type RepoConfig } from '../config.js';
 import type { Ticket } from './skald.js';
 
 export type Finding = {
@@ -11,6 +11,13 @@ export type Finding = {
   path?: string;
   line?: number;
 };
+
+// `heimr repo prepare` strips the clone origin, so the worktree has no trunk ref of its own.
+// Fetch it into refs/remotes/origin/<trunk> and hand back that ref.
+async function fetchTrunk(cwd: string, trunk: string): Promise<string> {
+  await run('git', ['fetch', 'origin', `${trunk}:refs/remotes/origin/${trunk}`], { cwd });
+  return `origin/${trunk}`;
+}
 
 async function workspacePath(workspace: string): Promise<string> {
   const { stdout } = await run('heimr', ['path', workspace]);
@@ -39,7 +46,14 @@ async function sealDispatch(
   await run('heimr', ['dispatch', 'seal', workspace, dispatch]);
 }
 
-function buildWorkMd(ticket: Ticket, verify: string): string {
+function prCommand(repo: RepoConfig): string {
+  return repo.forge === 'azure-devops'
+    ? '`az repos pr create --draft --target-branch ' + repo.trunk + '`'
+    : '`gh pr create --draft --base ' + repo.trunk + '`';
+}
+
+function buildWorkMd(ticket: Ticket, repo: RepoConfig): string {
+  const verify = repo.verify;
   return `# ${ticket.title}
 
 ## Goal
@@ -62,9 +76,16 @@ All of it must pass before the handoff is marked complete.
 
 ## Deliverable
 - Branch \`${ticket.id}\` pushed to origin.
-- A draft PR opened with \`gh pr create --draft\` (body ≤ 10 lines: one sentence, ≤ 4 bullets, one "Verified:" line).
+- A draft PR opened with ${prCommand(repo)} (body ≤ 10 lines: one sentence, ≤ 4 bullets, one "Verified:" line).
 - HANDOFF.json kept current, shape:
-  \`{"version":1,"status":"complete"|"partial","branch":"…","commit":"…","pr":"<url>|null","summary":"…","acceptance_criteria":[{"criterion":"…","status":"done"|"partial"|"not-started","evidence":"…"}],"blockers":["…"]}\`
+  \`{"version":1,"status":"complete"|"partial"|"escalated","branch":"…","commit":"…","pr":"<url>|null","summary":"…","acceptance_criteria":[{"criterion":"…","status":"done"|"partial"|"not-started","evidence":"…"}],"blockers":["…"],"escalation":"…"|null}\`
+
+## Escalation
+Try to resolve blockers yourself first. If a blocker cannot be resolved within this task's scope —
+the acceptance criteria assume something untrue, a decision belongs to a human, a tool or network
+policy makes a criterion impossible here — stop, commit and push what is sound, and set
+\`"status":"escalated"\` with \`"escalation"\` stating the problem and the decision or change needed.
+The ticket goes back to refining for a human; do not keep retrying or narrow the criteria yourself.
 `;
 }
 
@@ -104,7 +125,7 @@ function findingsMarkdown(findings: Finding[]): string {
 export const heimrPrepareBuild = hatchet.task({
   name: 'heimr-prepare-build',
   retries: 1,
-  fn: async (input: {
+  fn: logged(async (input: {
     ticket: Ticket;
     dispatch: string;
     findings?: Finding[];
@@ -117,20 +138,23 @@ export const heimrPrepareBuild = hatchet.task({
     if (!existsSync(`${path}/WORK.md`)) {
       await run('heimr', ['new', workspace]);
       await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
-        stdin: buildWorkMd(input.ticket, repo.verify),
+        stdin: buildWorkMd(input.ticket, repo),
       });
       await run('heimr', ['repo', 'prepare', workspace, '--from', repo.checkout]);
       await run('heimr', ['repo', 'set-push-remote', workspace, '--url', repo.pushUrl]);
     }
 
-    const inputs: Record<string, string> = { 'container-context.md': await containerContext() };
-    if (input.findings?.length) inputs['review-findings.md'] = findingsMarkdown(input.findings);
-    if (input.continuation) inputs['continue.md'] = input.continuation;
-    await sealDispatch(workspace, input.dispatch, inputs);
+    // Re-entrant: a replayed or respawned run finds its dispatch already sealed and moves on.
+    if (!existsSync(`${path}/dispatches/${input.dispatch}/dispatch.json`)) {
+      const inputs: Record<string, string> = { 'container-context.md': await containerContext() };
+      if (input.findings?.length) inputs['review-findings.md'] = findingsMarkdown(input.findings);
+      if (input.continuation) inputs['continue.md'] = input.continuation;
+      await sealDispatch(workspace, input.dispatch, inputs);
+    }
 
     await run('heimr', ['check', workspace]);
     return { workspace, workspacePath: path, dispatch: input.dispatch };
-  },
+  }),
 });
 
 // Fresh eyes: always a new workspace, prepared from the build worktree (which sits at the
@@ -138,7 +162,7 @@ export const heimrPrepareBuild = hatchet.task({
 export const heimrPrepareReview = hatchet.task({
   name: 'heimr-prepare-review',
   retries: 1,
-  fn: async (input: {
+  fn: logged(async (input: {
     ticket: Ticket;
     round: number;
     buildWorkspacePath: string;
@@ -149,27 +173,32 @@ export const heimrPrepareReview = hatchet.task({
 
     const { stdout: branchOut } = await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: buildRepo });
     const branch = branchOut.trim();
-    const { stdout: diff } = await run('git', ['diff', `${repo.trunk}...HEAD`], { cwd: buildRepo });
+    const trunkRef = await fetchTrunk(buildRepo, repo.trunk);
+    const { stdout: diff } = await run('git', ['diff', `${trunkRef}...HEAD`], { cwd: buildRepo });
     if (!diff.trim()) throw new Error(`empty diff between ${repo.trunk} and ${branch} in ${buildRepo}`);
 
     const workspace = `${input.ticket.id}-review-${input.round}`;
-    await run('heimr', ['new', workspace]);
-    await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
-      stdin: reviewWorkMd(input.ticket, branch),
-    });
-    await run('heimr', ['repo', 'prepare', workspace, '--from', buildRepo]);
-    await sealDispatch(workspace, 'review', {
-      'container-context.md': await containerContext(),
-      'target.diff': diff,
-    });
+    const path = await workspacePath(workspace);
+    if (!existsSync(`${path}/dispatches/review/dispatch.json`)) {
+      await run('heimr', ['new', workspace]);
+      await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
+        stdin: reviewWorkMd(input.ticket, branch),
+      });
+      await run('heimr', ['repo', 'prepare', workspace, '--from', buildRepo]);
+      await sealDispatch(workspace, 'review', {
+        'container-context.md': await containerContext(),
+        'target.diff': diff,
+      });
+    }
     await run('heimr', ['check', workspace]);
-    return { workspace, workspacePath: await workspacePath(workspace), dispatch: 'review', branch };
-  },
+    return { workspace, workspacePath: path, dispatch: 'review', branch };
+  }),
 });
 
 export type BuildHandoff = {
   version: number;
-  status: 'complete' | 'partial' | string;
+  status: 'complete' | 'partial' | 'escalated' | string;
+  escalation?: string | null;
   branch?: string | null;
   commit?: string | null;
   pr?: string | null;
@@ -190,7 +219,7 @@ export type ReviewHandoff = {
 export const heimrHandoff = hatchet.task({
   name: 'heimr-handoff',
   retries: 1,
-  fn: async (input: { workspace: string; dispatch: string }): Promise<{ handoff: JsonObject | null }> => {
+  fn: logged(async (input: { workspace: string; dispatch: string }): Promise<{ handoff: JsonObject | null }> => {
     try {
       const { stdout } = await run('heimr', ['dispatch', 'handoff', input.workspace, input.dispatch]);
       return { handoff: JSON.parse(stdout) };
@@ -198,17 +227,19 @@ export const heimrHandoff = hatchet.task({
       // A worker that died before writing a handoff is a reconcile case, not a crash.
       return { handoff: null };
     }
-  },
+  }),
 });
 
 // What the sandbox left behind, independently of what it claimed.
 export const gitReconcile = hatchet.task({
   name: 'git-reconcile',
-  fn: async (input: { workspacePath: string; trunk: string }) => {
+  fn: logged(async (input: { workspacePath: string; trunk: string }) => {
     const cwd = `${input.workspacePath}/repository`;
     const branch = (await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd })).stdout.trim();
-    const dirty = (await run('git', ['status', '--porcelain'], { cwd })).stdout.trim() !== '';
-    const ahead = Number((await run('git', ['rev-list', '--count', `${input.trunk}..HEAD`], { cwd })).stdout.trim());
+    // Untracked files (lockfiles, tool caches) are not stranded work.
+    const dirty = (await run('git', ['status', '--porcelain', '--untracked-files=no'], { cwd })).stdout.trim() !== '';
+    const trunkRef = await fetchTrunk(cwd, input.trunk);
+    const ahead = Number((await run('git', ['rev-list', '--count', `${trunkRef}..HEAD`], { cwd })).stdout.trim());
     let pushed = false;
     try {
       await run('git', ['fetch', 'origin', branch], { cwd });
@@ -219,5 +250,5 @@ export const gitReconcile = hatchet.task({
       pushed = false;
     }
     return { branch, dirty, ahead, pushed, onTrunk: branch === input.trunk };
-  },
+  }),
 });

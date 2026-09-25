@@ -44,11 +44,27 @@ npm run signal -- <ticket-id> cancel
 hatchet tui                                      # watch runs
 ```
 
+## Watching it
+
+Everything below stays on this machine: the worker talks only to the local hatchet-lite, and the
+`hatchet` CLI's own telemetry is off with `HATCHET_CLI_TELEMETRY_ENABLED=false`.
+
+- **Workers** — the worker registers in the tenant that minted its token. The dashboard only lists
+  tenants your user belongs to, so mint the token from the tenant you look at (Settings → API
+  Tokens), `hatchet profile add --name <tenant> --token …`, and set it as `defaultprofile`.
+- **Runs** — `sdlc-poll-skald` reports `{spawned, alreadyRunning}`; a ticket with a live
+  `sdlc-ticket` run is *alreadyRunning*, not a failure.
+- **Logs** (per task run) — every shell-out logs `$ cmd args`, then `✓`/`✗` with duration and a
+  stderr tail.
+- **Events** — `sdlc:ticket` events mark each phase boundary (`started`, `build`, `built`, `review`,
+  `reviewed`, `awaiting-signal`, `signal`, `paused`, `escalated`, `done`, `cancelled`); filter by
+  the `ticketId` metadata. A durable replay may repeat one — they are a timeline, not a trigger.
+
 ## Contracts the sandbox is held to
 
 `heimr-prepare-build` writes `WORK.md` from the skald ticket (title, AC, repo `verify` command) and
 asks for: branch `<ticket-id>` pushed to `origin`, a draft PR via `gh`, and a `HANDOFF.json` of shape
-`{status, branch, commit, pr, summary, acceptance_criteria[{criterion,status,evidence}], blockers[]}`.
+`{status: complete|partial|escalated, branch, commit, pr, summary, acceptance_criteria[{criterion,status,evidence}], blockers[], escalation}`. A worker that hits a blocker outside its scope sets `escalated`; the ticket goes back to `refining`, paused for human review.
 `git-reconcile` checks the worktree independently; the handoff's word is never enough.
 
 `heimr-prepare-review` prepares the review worktree from the build workspace's `repository/`
