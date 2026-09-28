@@ -140,11 +140,16 @@ export const heimrPrepareBuild = hatchet.task({
     const workspace = `${input.ticket.id}-build`;
     // `heimr path` answers for a workspace that does not exist yet, so probe the directory.
     const path = await resolveWorkspacePath(workspace);
-    if (!existsSync(`${path}/WORK.md`)) {
+    const isNewWorkspace = !existsSync(`${path}/WORK.md`);
+    if (isNewWorkspace) {
       await run('heimr', ['new', workspace]);
-      await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
-        stdin: await renderTemplate('build', buildTokens(input.ticket, repo)),
-      });
+    }
+    // Re-rendered from the caller's (freshly re-read) ticket on every prepare, not only when the
+    // workspace is first created, so a later round's AC and `pr` are never stuck at round one's.
+    await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
+      stdin: await renderTemplate('build', buildTokens(input.ticket, repo)),
+    });
+    if (isNewWorkspace) {
       await run('heimr', ['repo', 'prepare', workspace, '--from', repo.checkout]);
       await run('heimr', ['repo', 'set-push-remote', workspace, '--url', repo.pushUrl]);
     }
@@ -197,12 +202,19 @@ export const heimrPrepareReview = hatchet.task({
 
     const workspace = `${input.ticket.id}-review-${input.round}`;
     const path = await resolveWorkspacePath(workspace);
-    if (!existsSync(`${path}/dispatches/review/dispatch.json`)) {
+    const isNewWorkspace = !existsSync(`${path}/WORK.md`);
+    if (isNewWorkspace) {
       await run('heimr', ['new', workspace]);
-      await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
-        stdin: await renderTemplate('review', reviewTokens(input.ticket, repo, branch)),
-      });
+    }
+    // Re-rendered from the caller's (freshly re-read) ticket on every prepare, including a
+    // respawn that finds this round's dispatch already sealed.
+    await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
+      stdin: await renderTemplate('review', reviewTokens(input.ticket, repo, branch)),
+    });
+    if (isNewWorkspace) {
       await run('heimr', ['repo', 'prepare', workspace, '--from', buildRepo]);
+    }
+    if (!existsSync(`${path}/dispatches/review/dispatch.json`)) {
       await sealDispatch(workspace, path, 'review', {
         'container-context.md': await containerContext(),
         'target.diff': diff,

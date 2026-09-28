@@ -2,7 +2,7 @@ import type { DurableContext } from '@hatchet-dev/typescript-sdk';
 import { hatchet } from '../client.js';
 import { repoConfig } from '../config.js';
 import { heimrHandoff, heimrPrepareReview, type Finding, type ReviewHandoff } from '../tasks/heimr.js';
-import { skaldLog, type Ticket } from '../tasks/skald.js';
+import { skaldLog, skaldRead, type Ticket } from '../tasks/skald.js';
 import { sandboxRun } from './sandbox-run.js';
 
 export type ReviewPhaseInput = {
@@ -27,8 +27,10 @@ export const reviewPhase = hatchet.durableTask({
     const { ticket } = input;
     const repo = repoConfig(ticket.repo);
 
+    // Re-read fresh every time this round's review is prepared, never the object read at run
+    // start, so WORK.md reflects the ticket's current AC.
     const prepared = await heimrPrepareReview.run({
-      ticket,
+      ticket: await skaldRead.run({ ticketId: ticket.id }),
       round: input.round,
       buildWorkspacePath: input.buildWorkspacePath,
     });

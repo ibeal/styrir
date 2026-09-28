@@ -10,7 +10,7 @@ import {
   primaryDispatchName,
   type BuildHandoff,
 } from '../tasks/heimr.js';
-import { skaldLog, skaldSet, type Ticket } from '../tasks/skald.js';
+import { skaldLog, skaldRead, skaldSet, type Ticket } from '../tasks/skald.js';
 import { sandboxRun } from './sandbox-run.js';
 
 export type BuildPhaseInput = {
@@ -38,7 +38,9 @@ export const buildPhase = hatchet.durableTask({
     const repo = repoConfig(ticket.repo);
     const primary = primaryDispatchName(input.round);
 
-    let prepared = await heimrPrepareBuild.run({ ticket, dispatch: primary });
+    // Re-read fresh every time a dispatch is prepared, never the object read at run start, so
+    // WORK.md reflects the ticket's current AC and `pr` even on a later continuation or rework.
+    let prepared = await heimrPrepareBuild.run({ ticket: await skaldRead.run({ ticketId: ticket.id }), dispatch: primary });
     await skaldLog.run({
       ticketId: ticket.id,
       entry: `build round ${input.round}: sealed dispatch ${primary} in heimr workspace ${prepared.workspace}`,
@@ -122,7 +124,7 @@ export const buildPhase = hatchet.durableTask({
 
       dispatch = `${primary}-continue-${attempt + 1}`;
       prepared = await heimrPrepareBuild.run({
-        ticket,
+        ticket: await skaldRead.run({ ticketId: ticket.id }),
         dispatch,
         continuation:
           `# Continue\n\nThe previous run ended before the task was complete. Surviving work is on branch ` +
