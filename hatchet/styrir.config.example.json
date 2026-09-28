@@ -10,7 +10,26 @@
       "trunk": "main",
       "buildSpec": "styrir-building-v2",
       "reviewSpec": "styrir-reviewing",
-      "verify": "cargo test && cargo clippy -- -D warnings"
+      "verify": "cargo test && cargo clippy -- -D warnings",
+      "forge": "github"
+    },
+    "Elevate": {
+      "checkout": "/Users/ian.beal/repos/ap/Elevate",
+      "pushUrl": "https://dev.azure.com/anglepoint/Elevate/_git/Elevate",
+      "trunk": "master",
+      "forge": "azure-devops",
+      "buildSpec": "elevate-building",
+      "reviewSpec": "dotnet-reviewing",
+      "verify": "dotnet build AP.SAMPortal.sln && dotnet test AP.SAMPortal.sln"
+    },
+    "terraform": {
+      "checkout": "/Users/ian.beal/repos/ap/terraform",
+      "pushUrl": "https://github.com/Anglepoint-Engineering/terraform.git",
+      "trunk": "main",
+      "forge": "github",
+      "buildSpec": "terraform-building",
+      "reviewSpec": "terraform-reviewing",
+      "verify": "terraform fmt -check -recursive && (cd <changed module or environment> && terraform init -backend=false && terraform validate)"
     }
   }
 }

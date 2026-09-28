@@ -5,6 +5,7 @@ export type RepoConfig = {
   checkout: string;
   pushUrl: string;
   trunk: string;
+  forge: 'github' | 'azure-devops';
   buildSpec: string;
   reviewSpec: string;
   verify: string;

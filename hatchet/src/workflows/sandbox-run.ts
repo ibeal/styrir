@@ -19,6 +19,7 @@ export type SandboxRunOutput = {
   exitStatus: number | null;
   failure: string | null;
   handoff: JsonObject | null;
+  stderrTail: string;
 };
 
 // One Gardr container, start to handoff. Durable so the wait costs no worker slot; the
@@ -46,8 +47,8 @@ export const sandboxRun = hatchet.durableTask({
       observed = await gardrObserve.run({ runId });
     }
 
-    await gardrCleanup.run({ runId });
+    const { stderrTail } = await gardrCleanup.run({ runId });
     const { handoff } = await heimrHandoff.run({ workspace: input.workspace, dispatch: input.dispatch });
-    return { runId, exitStatus: observed.exitStatus, failure: observed.failure, handoff };
+    return { runId, exitStatus: observed.exitStatus, failure: observed.failure, handoff, stderrTail };
   },
 });
