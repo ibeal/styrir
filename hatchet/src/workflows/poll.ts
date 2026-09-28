@@ -8,7 +8,7 @@ import { sdlcTicket } from './ticket.js';
 // run collides on its idempotency key; that is the expected steady state, not a failure.
 export const pollSkald = hatchet.task({
   name: 'sdlc-poll-skald',
-  onCrons: ['*/5 * * * *'],
+  onCrons: ['*/3 * * * *'],
   fn: async (_input: {}, ctx: Context<{}>) => {
     const { ticketIds } = await skaldListBuilding.run({});
     const spawned: string[] = [];
