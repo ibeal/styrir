@@ -9,7 +9,6 @@ import {
   heimrPrepareBuild,
   primaryDispatchName,
   type BuildHandoff,
-  type Finding,
 } from '../tasks/heimr.js';
 import { skaldLog, skaldSet, type Ticket } from '../tasks/skald.js';
 import { sandboxRun } from './sandbox-run.js';
@@ -17,7 +16,6 @@ import { sandboxRun } from './sandbox-run.js';
 export type BuildPhaseInput = {
   ticket: Ticket;
   round: number; // 1 = first build; >1 = rework after review round-1
-  findings?: Finding[];
 };
 
 export type BuildPhaseOutput = {
@@ -40,7 +38,7 @@ export const buildPhase = hatchet.durableTask({
     const repo = repoConfig(ticket.repo);
     const primary = primaryDispatchName(input.round);
 
-    let prepared = await heimrPrepareBuild.run({ ticket, dispatch: primary, findings: input.findings });
+    let prepared = await heimrPrepareBuild.run({ ticket, dispatch: primary });
     await skaldLog.run({
       ticketId: ticket.id,
       entry: `build round ${input.round}: sealed dispatch ${primary} in heimr workspace ${prepared.workspace}`,

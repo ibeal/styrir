@@ -9,10 +9,8 @@ import {
   heimrActiveDispatch,
   heimrBuildRounds,
   heimrHandoff,
-  heimrResolveRework,
   primaryDispatchName,
   type BuildHandoff,
-  type Finding,
 } from '../tasks/heimr.js';
 import { skaldLog, skaldRead, skaldSet, type Ticket } from '../tasks/skald.js';
 import { buildPhase } from './build-phase.js';
@@ -43,7 +41,6 @@ export type TicketOutput = { ticketId: string; outcome: 'done' | 'cancelled' | '
 type EntryState = {
   mode: 'first-build' | 'continue' | 'rework' | 'review-only';
   round: number;
-  findings: Finding[] | undefined;
   buildWorkspacePath: string | null;
   reason: string;
 };
@@ -58,7 +55,7 @@ async function resolveEntryState(ticket: Ticket): Promise<EntryState> {
   const rounds = await heimrBuildRounds.run({ ticketId: ticket.id });
 
   if (rounds.workspacePath === null || rounds.rounds.length === 0) {
-    return { mode: 'first-build', round: 1, findings: undefined, buildWorkspacePath: null, reason: 'no prior build workspace' };
+    return { mode: 'first-build', round: 1, buildWorkspacePath: null, reason: 'no prior build workspace' };
   }
 
   const highestRound = rounds.rounds[rounds.rounds.length - 1];
@@ -72,7 +69,6 @@ async function resolveEntryState(ticket: Ticket): Promise<EntryState> {
     return {
       mode: 'review-only',
       round: highestRound,
-      findings: undefined,
       buildWorkspacePath: rounds.workspacePath,
       reason: `round ${highestRound}'s build is complete and the ticket is already reviewing`,
     };
@@ -82,7 +78,6 @@ async function resolveEntryState(ticket: Ticket): Promise<EntryState> {
     return {
       mode: 'continue',
       round: highestRound,
-      findings: undefined,
       buildWorkspacePath: rounds.workspacePath,
       reason: `round ${highestRound}'s build is incomplete (${problems.join('; ')}); resuming it in place`,
     };
@@ -90,14 +85,14 @@ async function resolveEntryState(ticket: Ticket): Promise<EntryState> {
 
   // The active dispatch is done (clean, pushed, PR, handoff complete) yet the ticket is back at
   // `building` — that only happens when something sent it back for another pass. This round is
-  // done; the next one starts here, fed by whatever durable record explains why.
-  const rework = await heimrResolveRework.run({ ticketId: ticket.id, buildWorkspacePath: rounds.workspacePath, completedRound: highestRound });
+  // done; the next one starts here. Its dispatch carries the prior review round's handoff
+  // verbatim, plus any `styrir signal rework` note already staged into it — both sourced fresh
+  // by `heimr-prepare-build` from disk, never reconstructed here.
   return {
     mode: 'rework',
     round: highestRound + 1,
-    findings: rework.findings,
     buildWorkspacePath: rounds.workspacePath,
-    reason: `round ${highestRound}'s build was already complete but the ticket is building again; starting round ${highestRound + 1} with ${rework.findings.length} durable finding(s)`,
+    reason: `round ${highestRound}'s build was already complete but the ticket is building again; starting round ${highestRound + 1}`,
   };
 }
 
@@ -135,7 +130,6 @@ export const sdlcTicket = hatchet.durableTask({
     await skaldLog.run({ ticketId, entry: `hatchet: resumed — mode ${entry.mode} (round ${entry.round}): ${entry.reason}` });
 
     let round = entry.round;
-    let findings = entry.findings;
     let buildWorkspacePath: string | null = entry.buildWorkspacePath;
     let skipBuild = entry.mode === 'review-only';
 
@@ -143,7 +137,7 @@ export const sdlcTicket = hatchet.durableTask({
     while (true) {
       if (!skipBuild) {
         await emit(ticketId, 'build', { round });
-        const build = await buildPhase.run({ ticket, round, findings });
+        const build = await buildPhase.run({ ticket, round });
         buildWorkspacePath = build.workspacePath;
         await emit(ticketId, build.escalated ? 'escalated' : build.ok ? 'built' : 'build-incomplete', { round, branch: build.branch, pr: build.pr, reason: build.reason });
         if (build.escalated) return { ticketId, outcome: 'escalated', reason: build.reason };
@@ -161,7 +155,6 @@ export const sdlcTicket = hatchet.durableTask({
         return pause(`review round cap (${config.maxReviewRounds}) hit with ${review.actionable.length} actionable finding(s)`);
       }
       round += 1;
-      findings = review.actionable;
     }
 
     // Publishing and merging are the human boundary. Park the ticket and wait for the signal.
@@ -196,14 +189,14 @@ export const sdlcTicket = hatchet.durableTask({
         return { ticketId, outcome: 'cancelled', reason: signal.note ?? null };
       }
 
-      // rework: one more build round from a durable record — the previous review round's
-      // handoff and/or the note `styrir signal rework` left in the build workspace — then fresh
-      // eyes again. Never reuse `signal.note` directly: that value only exists for as long as
-      // this run does, and this is the same durable source a cold respawn would derive.
+      // rework: one more build round. `heimr-prepare-build` sources this round's dispatch
+      // content itself — the previous review round's handoff verbatim, plus any note `styrir
+      // signal rework` already staged into it — so there is nothing to derive here. Never reuse
+      // `signal.note` directly: that value only exists for as long as this run does, and it was
+      // already written durably by the CLI before this event ever arrived.
       await skaldSet.run({ ticketId, paused: '' });
-      const rework = await heimrResolveRework.run({ ticketId: ticket.id, buildWorkspacePath: buildWorkspacePath!, completedRound: round });
       round += 1;
-      const build = await buildPhase.run({ ticket, round, findings: rework.findings });
+      const build = await buildPhase.run({ ticket, round });
       buildWorkspacePath = build.workspacePath;
       if (build.escalated) return { ticketId, outcome: 'escalated', reason: build.reason };
       if (!build.ok) return pause(`rework round ${round} incomplete: ${build.reason}`);

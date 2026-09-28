@@ -13,7 +13,7 @@ sdlc-ticket <id>             durable; idempotent per ticket id
   │     no build workspace yet              ⇒ first-build, round 1
   │     active dispatch incomplete          ⇒ continue,    same round, resumed in place
   │     ticket already reviewing            ⇒ review-only, same round, build-phase skipped
-  │     active dispatch complete + building ⇒ rework,      round + 1, heimr-resolve-rework findings
+  │     active dispatch complete + building ⇒ rework,      round + 1 (heimr-prepare-build sources its own inbox)
   build-phase ─ heimr-prepare-build → heimr-active-dispatch (attempt count from disk) → sandbox-run
   │             → git-reconcile → skald set reviewing
   │             (incomplete run ⇒ "continue" dispatch into the same workspace, ≤ maxBuildContinuations;
@@ -25,8 +25,8 @@ sdlc-ticket <id>             durable; idempotent per ticket id
   │             verdict = severities: any blocking/should-fix ⇒ request-changes ⇒ next build round
   │             (≤ maxReviewRounds, then --paused)
   approve ⇒ skald --paused "waiting on Ian" ⇒ waitForEvent ticket:signal
-  merged ⇒ done · rework ⇒ heimr-resolve-rework (prior review handoff + durable note) → one more
-  build+review round · cancel ⇒ cancelled
+  merged ⇒ done · rework ⇒ one more build+review round (next build dispatch already carries the
+  prior review handoff + any staged note) · cancel ⇒ cancelled
 sandbox-run                  gardr start → observe every pollIntervalSeconds → cleanup → HANDOFF.json
                              tenant-scoped concurrency "gardr-sandboxes" = maxConcurrentSandboxes
 ```
@@ -45,12 +45,13 @@ N, `<primary>-continue-N` = an attempt within a round) precisely so a fresh proc
 back off disk and recover where the last one left off, and never reseal a name a prior process
 already used.
 
-`styrir signal <id> rework "<note>"` writes the note straight into the build workspace
-(`PENDING_REWORK.json`, outside heimr's dispatch machinery — a note *about* the next dispatch, not
-a dispatch input) and unparks the ticket, so it works whether or not a run is currently alive to
-catch the `ticket:signal` event. The next run to touch that workspace — live or respawned — reads
-and consumes it via `heimr-resolve-rework`, alongside any actionable findings from the review round
-that just approved or capped out.
+`styrir signal <id> rework "<note>"` stages the note as `inbox/human-note.md` in the *next* build
+round's dispatch — created early via `heimr dispatch new`/`dispatch put` if it doesn't exist yet,
+never a raw write into the workspace — then unparks the ticket, so it works whether or not a run is
+currently alive to catch the `ticket:signal` event. That dispatch is exactly the one
+`heimr-prepare-build` seals when the round actually starts, live or respawned, so it just adds its
+usual inputs (`container-context.md`, and `inbox/review-<round>.handoff.json` — the prior review
+round's HANDOFF.json verbatim) to what's already staged there and seals once.
 
 A fresh run's resolved mode and reason go into the skald log as one line
 (`hatchet: resumed — mode <mode> (round <n>): <reason>`), so a human reading the ticket's log
@@ -96,14 +97,21 @@ Everything below stays on this machine: the worker talks only to the local hatch
 
 ## Contracts the sandbox is held to
 
-`heimr-prepare-build` writes `WORK.md` from the skald ticket (title, AC, repo `verify` command) and
-asks for: branch `<ticket-id>` pushed to `origin`, a draft PR via `gh`, and a `HANDOFF.json` of shape
-`{status: complete|partial|escalated, branch, commit, pr, summary, acceptance_criteria[{criterion,status,evidence}], blockers[], escalation}`. A worker that hits a blocker outside its scope sets `escalated`; the ticket goes back to `refining`, paused for human review.
-`git-reconcile` checks the worktree independently; the handoff's word is never enough.
+heimr owns the agent prompts and the handoff shapes — run `heimr docs` for both; this file doesn't
+restate them. Styrir's part of the contract is narrower:
 
-`heimr-prepare-review` prepares the review worktree from the build workspace's `repository/`
-(which sits at the branch tip) and seals `target.diff` = `git diff <trunk>...HEAD`. The review
-handoff shape is `{status, verdict, summary, acceptance_criteria[], findings[{severity,description,path,line}]}`.
+- `heimr-prepare-build`/`heimr-prepare-review` render `WORK.md` by substituting the `{{token}}`
+  placeholders `heimr template build|review` declares (title, ticket id, AC, branch, trunk, verify
+  command, PR command, PR url) literally; a token this repo doesn't supply is left as-is.
+- A rework build dispatch's `inbox/` holds the judged review round's `HANDOFF.json` verbatim
+  (`heimr dispatch handoff` → `heimr dispatch put`) plus, if `styrir signal rework` ran,
+  `human-note.md`. A review dispatch never gets an inbox.
+- `git-reconcile` checks the worktree independently of what a build handoff claims; a worker that
+  hits a blocker outside its scope sets `escalated`, and the ticket goes back to `refining`, paused
+  for human review.
+- Verdict/rework routing reads a handoff's `status`/`verdict`/finding `severity` and disk state,
+  exactly as before; a handoff's `threads`/`thread_url` fields (PR-thread bookkeeping the
+  builder/reviewer own directly on the forge) are not read here.
 
 ## Redeploying
 

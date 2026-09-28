@@ -7,7 +7,6 @@ import {
   heimrHandoff,
   heimrPrepareBuild,
   heimrPrepareReview,
-  heimrResolveRework,
 } from './tasks/heimr.js';
 import { skaldListBuilding, skaldLog, skaldRead, skaldSet } from './tasks/skald.js';
 import { buildPhase } from './workflows/build-phase.js';
@@ -22,7 +21,7 @@ async function main() {
       sdlcTicket, pollSkald, buildPhase, reviewPhase, sandboxRun,
       skaldRead, skaldSet, skaldLog, skaldListBuilding,
       heimrPrepareBuild, heimrPrepareReview, heimrHandoff, gitReconcile,
-      heimrActiveDispatch, heimrBuildRounds, heimrResolveRework,
+      heimrActiveDispatch, heimrBuildRounds,
       gardrStart, gardrObserve, gardrCleanup,
     ],
     // Durable waits are evicted, so this bounds concurrent shell-outs, not tickets in flight.
