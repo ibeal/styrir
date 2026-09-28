@@ -1,7 +1,16 @@
 import type { DurableContext } from '@hatchet-dev/typescript-sdk';
 import { hatchet } from '../client.js';
 import { config, repoConfig } from '../config.js';
-import { gitReconcile, heimrHandoff, heimrPrepareBuild, type BuildHandoff, type Finding } from '../tasks/heimr.js';
+import {
+  buildProblems,
+  gitReconcile,
+  heimrActiveDispatch,
+  heimrHandoff,
+  heimrPrepareBuild,
+  primaryDispatchName,
+  type BuildHandoff,
+  type Finding,
+} from '../tasks/heimr.js';
 import { skaldLog, skaldSet, type Ticket } from '../tasks/skald.js';
 import { sandboxRun } from './sandbox-run.js';
 
@@ -21,26 +30,6 @@ export type BuildPhaseOutput = {
   reason: string | null;
 };
 
-type GitState = { branch: string; dirty: boolean; ahead: number; pushed: boolean; onTrunk: boolean };
-
-function problemsWith(handoff: BuildHandoff | null, git: GitState, trunk: string): string[] {
-  const out: string[] = [];
-  if (!handoff) out.push('no HANDOFF.json');
-  else {
-    if (handoff.status !== 'complete') out.push(`handoff status ${handoff.status}`);
-    for (const ac of handoff.acceptance_criteria ?? []) {
-      if (ac.status !== 'done') out.push(`AC ${ac.status}: ${ac.criterion}`);
-    }
-    for (const b of handoff.blockers ?? []) out.push(`blocker: ${b}`);
-    if (!handoff.pr) out.push('no PR in handoff');
-  }
-  if (git.onTrunk) out.push(`still on ${trunk}`);
-  if (git.ahead === 0) out.push('no commits ahead of trunk');
-  if (git.dirty) out.push('worktree dirty');
-  if (!git.pushed) out.push('branch not pushed');
-  return out;
-}
-
 // Exit 0 is not completion. Every run is reconciled against git and the handoff, and a
 // mid-flight worker is continued in the same workspace rather than redispatched cold.
 export const buildPhase = hatchet.durableTask({
@@ -49,20 +38,26 @@ export const buildPhase = hatchet.durableTask({
   fn: async (input: BuildPhaseInput, ctx: DurableContext<BuildPhaseInput>): Promise<BuildPhaseOutput> => {
     const { ticket } = input;
     const repo = repoConfig(ticket.repo);
+    const primary = primaryDispatchName(input.round);
 
-    let dispatch = input.round === 1 ? 'build' : `rework-${input.round}`;
-    let prepared = await heimrPrepareBuild.run({ ticket, dispatch, findings: input.findings });
+    let prepared = await heimrPrepareBuild.run({ ticket, dispatch: primary, findings: input.findings });
     await skaldLog.run({
       ticketId: ticket.id,
-      entry: `build round ${input.round}: sealed dispatch ${dispatch} in heimr workspace ${prepared.workspace}`,
+      entry: `build round ${input.round}: sealed dispatch ${primary} in heimr workspace ${prepared.workspace}`,
     });
 
-    for (let attempt = 0; ; attempt++) {
+    // A fresh process (a respawn, not a replay) has no memory of how many continuation attempts
+    // this round already made; derive the active dispatch and attempt count from disk so a new
+    // continuation never reuses a name a prior process already sealed.
+    const active = await heimrActiveDispatch.run({ workspacePath: prepared.workspacePath, primary });
+    let dispatch = active.dispatch;
+
+    for (let attempt = active.attempt; ; attempt++) {
       // Reconcile before spending a sandbox: a respawned run whose worker already finished
       // (or a dispatch sealed by a previous, failed run) must not build twice.
       let handoff = (await heimrHandoff.run({ workspace: prepared.workspace, dispatch })).handoff as BuildHandoff | null;
       let git = await gitReconcile.run({ workspacePath: prepared.workspacePath, trunk: repo.trunk });
-      let problems = problemsWith(handoff, git, repo.trunk);
+      let problems = buildProblems(handoff, git, repo.trunk);
       let runId = 'skipped; prior run already complete';
 
       if (problems.length > 0) {
@@ -76,7 +71,7 @@ export const buildPhase = hatchet.durableTask({
         runId = result.runId;
         handoff = result.handoff as BuildHandoff | null;
         git = await gitReconcile.run({ workspacePath: prepared.workspacePath, trunk: repo.trunk });
-        problems = problemsWith(handoff, git, repo.trunk);
+        problems = buildProblems(handoff, git, repo.trunk);
         if (result.exitStatus !== 0) problems.push(`gardr exit ${result.exitStatus}${result.failure ? `: ${result.failure}` : ''}`);
         if (!handoff && result.stderrTail) problems.push(`gardr stderr: ${result.stderrTail}`);
       }
@@ -127,7 +122,7 @@ export const buildPhase = hatchet.durableTask({
         };
       }
 
-      dispatch = `${input.round === 1 ? 'build' : `rework-${input.round}`}-continue-${attempt + 1}`;
+      dispatch = `${primary}-continue-${attempt + 1}`;
       prepared = await heimrPrepareBuild.run({
         ticket,
         dispatch,

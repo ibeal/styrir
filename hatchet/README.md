@@ -8,19 +8,53 @@ Replaces `styrir serve` and the Paperclip bridge.
 sdlc-poll-skald  (cron */5)  skald list → spawn sdlc-ticket per unpaused building/reviewing ticket
 sdlc-ticket <id>             durable; idempotent per ticket id
   skald-read
-  build-phase ─ heimr-prepare-build → sandbox-run → git-reconcile → skald set reviewing
-  │             (incomplete run ⇒ "continue" dispatch into the same workspace, ≤ maxBuildContinuations)
-  review-phase ─ heimr-prepare-review (new workspace, diff+AC+checklist only) → sandbox-run
+  resolve-entry-state ─ heimr-build-rounds + heimr-active-dispatch + heimr-handoff + git-reconcile
+  │   derives the round and mode from disk every run, never a local counter:
+  │     no build workspace yet              ⇒ first-build, round 1
+  │     active dispatch incomplete          ⇒ continue,    same round, resumed in place
+  │     ticket already reviewing            ⇒ review-only, same round, build-phase skipped
+  │     active dispatch complete + building ⇒ rework,      round + 1, heimr-resolve-rework findings
+  build-phase ─ heimr-prepare-build → heimr-active-dispatch (attempt count from disk) → sandbox-run
+  │             → git-reconcile → skald set reviewing
+  │             (incomplete run ⇒ "continue" dispatch into the same workspace, ≤ maxBuildContinuations;
+  │             the continuation number is derived from existing `*-continue-N` dispatches, so a
+  │             respawned attempt can never reseal a name a prior process already used)
+  review-phase ─ heimr-prepare-review (new workspace per round, diff+AC+checklist only)
+  │             → heimr-handoff (skip the sandbox only if this round's dispatch already judged it)
+  │             → sandbox-run
   │             verdict = severities: any blocking/should-fix ⇒ request-changes ⇒ next build round
   │             (≤ maxReviewRounds, then --paused)
   approve ⇒ skald --paused "waiting on Ian" ⇒ waitForEvent ticket:signal
-  merged ⇒ done · rework <note> ⇒ one more build+review round · cancel ⇒ cancelled
+  merged ⇒ done · rework ⇒ heimr-resolve-rework (prior review handoff + durable note) → one more
+  build+review round · cancel ⇒ cancelled
 sandbox-run                  gardr start → observe every pollIntervalSeconds → cleanup → HANDOFF.json
                              tenant-scoped concurrency "gardr-sandboxes" = maxConcurrentSandboxes
 ```
 
 Not here: intake/`refining` (do it in a session; the workflow starts at `building`), parent/slice
 aggregation (each slice is its own `sdlc-ticket`), PR thread replies, publishing/merging.
+
+## Derived state, not run state
+
+A Hatchet run can end (pause, escalation, worker restart) and be respawned by the next poll cycle as
+a brand-new process with no memory of the one before it. Only skald's `status`/`paused` and the
+heimr build workspace on disk survive that gap, so every run derives its round, its findings, and
+whether to build at all from those two things at the top of `sdlc-ticket` — never from a local
+variable seeded to `1`. The dispatch names carry the round (`build` = round 1, `rework-N` = round
+N, `<primary>-continue-N` = an attempt within a round) precisely so a fresh process can read them
+back off disk and recover where the last one left off, and never reseal a name a prior process
+already used.
+
+`styrir signal <id> rework "<note>"` writes the note straight into the build workspace
+(`PENDING_REWORK.json`, outside heimr's dispatch machinery — a note *about* the next dispatch, not
+a dispatch input) and unparks the ticket, so it works whether or not a run is currently alive to
+catch the `ticket:signal` event. The next run to touch that workspace — live or respawned — reads
+and consumes it via `heimr-resolve-rework`, alongside any actionable findings from the review round
+that just approved or capped out.
+
+A fresh run's resolved mode and reason go into the skald log as one line
+(`hatchet: resumed — mode <mode> (round <n>): <reason>`), so a human reading the ticket's log
+always sees which of first build / continue / rework / review-only was chosen and why.
 
 ## Run
 

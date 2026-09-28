@@ -1,5 +1,5 @@
 import type { JsonObject } from '@hatchet-dev/typescript-sdk';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { hatchet } from '../client.js';
 import { logged, run } from '../exec.js';
 import { repoConfig, type RepoConfig } from '../config.js';
@@ -19,9 +19,40 @@ async function fetchTrunk(cwd: string, trunk: string): Promise<string> {
   return `origin/${trunk}`;
 }
 
-async function workspacePath(workspace: string): Promise<string> {
+export async function resolveWorkspacePath(workspace: string): Promise<string> {
   const { stdout } = await run('heimr', ['path', workspace]);
   return stdout.trim();
+}
+
+// The build dispatch that names a round: `build` is round 1, `rework-N` is round N (N > 1).
+// `*-continue-*` dispatches never name a round on their own — they are attempts within one.
+export function primaryDispatchName(round: number): string {
+  return round === 1 ? 'build' : `rework-${round}`;
+}
+
+export function parsePrimaryRound(dispatchName: string): number | null {
+  if (dispatchName === 'build') return 1;
+  const m = /^rework-(\d+)$/.exec(dispatchName);
+  return m ? Number(m[1]) : null;
+}
+
+function listDispatches(workspacePath: string): string[] {
+  try {
+    return readdirSync(`${workspacePath}/dispatches`);
+  } catch {
+    return [];
+  }
+}
+
+function pendingReworkPath(workspacePath: string): string {
+  return `${workspacePath}/PENDING_REWORK.json`;
+}
+
+// Written directly to the workspace root, outside heimr's dispatch machinery: it is a durable
+// note *about* the next dispatch, not a dispatch input, and heimr has no "arbitrary workspace
+// file" command. `heimr check` only verifies sealed dispatch inventories, so this is inert to it.
+export function writePendingRework(workspacePath: string, note: string): void {
+  writeFileSync(pendingReworkPath(workspacePath), JSON.stringify({ note, at: new Date().toISOString() }, null, 2));
 }
 
 // `rata only profile container` is the standing sandboxed-worker protocol. The header
@@ -134,7 +165,7 @@ export const heimrPrepareBuild = hatchet.task({
     const repo = repoConfig(input.ticket.repo);
     const workspace = `${input.ticket.id}-build`;
     // `heimr path` answers for a workspace that does not exist yet, so probe the directory.
-    const path = await workspacePath(workspace);
+    const path = await resolveWorkspacePath(workspace);
     if (!existsSync(`${path}/WORK.md`)) {
       await run('heimr', ['new', workspace]);
       await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
@@ -178,7 +209,7 @@ export const heimrPrepareReview = hatchet.task({
     if (!diff.trim()) throw new Error(`empty diff between ${repo.trunk} and ${branch} in ${buildRepo}`);
 
     const workspace = `${input.ticket.id}-review-${input.round}`;
-    const path = await workspacePath(workspace);
+    const path = await resolveWorkspacePath(workspace);
     if (!existsSync(`${path}/dispatches/review/dispatch.json`)) {
       await run('heimr', ['new', workspace]);
       await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
@@ -192,6 +223,68 @@ export const heimrPrepareReview = hatchet.task({
     }
     await run('heimr', ['check', workspace]);
     return { workspace, workspacePath: path, dispatch: 'review', branch };
+  }),
+});
+
+// What a build round's active dispatch is *right now*: the primary (`build`/`rework-N`) if no
+// continuation of it exists yet, otherwise the highest-numbered `*-continue-N` of that primary.
+// Derived from disk every call, so a brand-new process (a respawn, not a replay) resumes the
+// same attempt count a prior process left off at instead of re-using attempt 0 and risking a
+// dispatch name collision with a continuation the prior process already sealed.
+export const heimrActiveDispatch = hatchet.task({
+  name: 'heimr-active-dispatch',
+  fn: logged(async (input: { workspacePath: string; primary: string }): Promise<{ dispatch: string; attempt: number }> => {
+    const prefix = `${input.primary}-continue-`;
+    const attempts = listDispatches(input.workspacePath)
+      .filter((n) => n.startsWith(prefix))
+      .map((n) => Number(n.slice(prefix.length)))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    const attempt = attempts.length ? Math.max(...attempts) : 0;
+    return { dispatch: attempt > 0 ? `${prefix}${attempt}` : input.primary, attempt };
+  }),
+});
+
+// The durable record of every round a ticket's build workspace has ever seen, read straight off
+// disk so it survives every process this ticket has ever been driven by, not just this one.
+export const heimrBuildRounds = hatchet.task({
+  name: 'heimr-build-rounds',
+  fn: logged(async (input: { ticketId: string }): Promise<{ workspace: string; workspacePath: string | null; rounds: number[] }> => {
+    const workspace = `${input.ticketId}-build`;
+    const path = await resolveWorkspacePath(workspace);
+    if (!existsSync(`${path}/WORK.md`)) return { workspace, workspacePath: null, rounds: [] };
+    const rounds = listDispatches(path)
+      .map(parsePrimaryRound)
+      .filter((r): r is number => r !== null)
+      .sort((a, b) => a - b);
+    return { workspace, workspacePath: path, rounds };
+  }),
+});
+
+// The durable findings for a rework round: the actionable findings from the review round that
+// just judged the completed build (if one ran), plus any human note left by `styrir signal
+// rework`. Never trust an in-memory value for this — it must be reconstructable by a process
+// that has no memory of the round that just finished, which is the whole point of a respawn fix.
+export const heimrResolveRework = hatchet.task({
+  name: 'heimr-resolve-rework',
+  fn: logged(async (input: { ticketId: string; buildWorkspacePath: string; completedRound: number }): Promise<{ findings: Finding[] }> => {
+    const findings: Finding[] = [];
+    try {
+      const { stdout } = await run('heimr', ['dispatch', 'handoff', `${input.ticketId}-review-${input.completedRound}`, 'review']);
+      const handoff = JSON.parse(stdout) as ReviewHandoff;
+      for (const f of handoff.findings ?? []) {
+        if (f.severity === 'blocking' || f.severity === 'should-fix') findings.push(f);
+      }
+    } catch {
+      // No completed review round on record — e.g. rework was requested before any review ran.
+    }
+
+    const noteFile = pendingReworkPath(input.buildWorkspacePath);
+    if (existsSync(noteFile)) {
+      const data = JSON.parse(readFileSync(noteFile, 'utf8')) as { note?: string };
+      if (data.note) findings.push({ severity: 'should-fix', description: `Ian: ${data.note}` });
+      rmSync(noteFile); // consume once: it must not also feed a later round
+    }
+    return { findings };
   }),
 });
 
@@ -216,6 +309,29 @@ export type ReviewHandoff = {
   findings?: Finding[];
 };
 
+export type GitState = { branch: string; dirty: boolean; ahead: number; pushed: boolean; onTrunk: boolean };
+
+// Whether a build round's active dispatch is actually done, independent of what the handoff or
+// the caller assumed: no handoff, an incomplete/blocked handoff, or a worktree that isn't a
+// pushed, clean branch off trunk are all reasons this round is not over.
+export function buildProblems(handoff: BuildHandoff | null, git: GitState, trunk: string): string[] {
+  const out: string[] = [];
+  if (!handoff) out.push('no HANDOFF.json');
+  else {
+    if (handoff.status !== 'complete') out.push(`handoff status ${handoff.status}`);
+    for (const ac of handoff.acceptance_criteria ?? []) {
+      if (ac.status !== 'done') out.push(`AC ${ac.status}: ${ac.criterion}`);
+    }
+    for (const b of handoff.blockers ?? []) out.push(`blocker: ${b}`);
+    if (!handoff.pr) out.push('no PR in handoff');
+  }
+  if (git.onTrunk) out.push(`still on ${trunk}`);
+  if (git.ahead === 0) out.push('no commits ahead of trunk');
+  if (git.dirty) out.push('worktree dirty');
+  if (!git.pushed) out.push('branch not pushed');
+  return out;
+}
+
 export const heimrHandoff = hatchet.task({
   name: 'heimr-handoff',
   retries: 1,
@@ -233,7 +349,7 @@ export const heimrHandoff = hatchet.task({
 // What the sandbox left behind, independently of what it claimed.
 export const gitReconcile = hatchet.task({
   name: 'git-reconcile',
-  fn: logged(async (input: { workspacePath: string; trunk: string }) => {
+  fn: logged(async (input: { workspacePath: string; trunk: string }): Promise<GitState> => {
     const cwd = `${input.workspacePath}/repository`;
     const branch = (await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd })).stdout.trim();
     // Untracked files (lockfiles, tool caches) are not stranded work.
