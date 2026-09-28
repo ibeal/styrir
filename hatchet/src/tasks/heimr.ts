@@ -1,5 +1,5 @@
 import type { JsonObject } from '@hatchet-dev/typescript-sdk';
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { hatchet } from '../client.js';
 import { logged, run } from '../exec.js';
 import { repoConfig, type RepoConfig } from '../config.js';
@@ -44,17 +44,6 @@ function listDispatches(workspacePath: string): string[] {
   }
 }
 
-function pendingReworkPath(workspacePath: string): string {
-  return `${workspacePath}/PENDING_REWORK.json`;
-}
-
-// Written directly to the workspace root, outside heimr's dispatch machinery: it is a durable
-// note *about* the next dispatch, not a dispatch input, and heimr has no "arbitrary workspace
-// file" command. `heimr check` only verifies sealed dispatch inventories, so this is inert to it.
-export function writePendingRework(workspacePath: string, note: string): void {
-  writeFileSync(pendingReworkPath(workspacePath), JSON.stringify({ note, at: new Date().toISOString() }, null, 2));
-}
-
 // `rata only profile container` is the standing sandboxed-worker protocol. The header
 // and any host path are stripped because the file is a dispatch input, not a Rata artifact.
 async function containerContext(): Promise<string> {
@@ -65,14 +54,35 @@ async function containerContext(): Promise<string> {
     .join('\n');
 }
 
+// The only way anything is ever written into a heimr workspace: create the dispatch directory
+// through `heimr dispatch new` the first time (a dispatch may already exist and be unsealed —
+// `styrir signal rework` stages `inbox/human-note.md` into a future round's dispatch ahead of
+// that round's own prepare step, so "already exists" here is expected, not an error), then put
+// the file. Refuses outright if the dispatch is already sealed: there is no way to add to it.
+export async function stageDispatchFile(
+  workspace: string,
+  workspacePath: string,
+  dispatch: string,
+  path: string,
+  content: string,
+): Promise<void> {
+  if (existsSync(`${workspacePath}/dispatches/${dispatch}/dispatch.json`)) {
+    throw new Error(`dispatch ${dispatch} in workspace ${workspace} is already sealed; too late to add ${path}`);
+  }
+  if (!existsSync(`${workspacePath}/dispatches/${dispatch}`)) {
+    await run('heimr', ['dispatch', 'new', workspace, dispatch]);
+  }
+  await run('heimr', ['dispatch', 'put', workspace, dispatch, '--path', path], { stdin: content });
+}
+
 async function sealDispatch(
   workspace: string,
+  workspacePath: string,
   dispatch: string,
   inputs: Record<string, string>,
 ): Promise<void> {
-  await run('heimr', ['dispatch', 'new', workspace, dispatch]);
   for (const [path, content] of Object.entries(inputs)) {
-    await run('heimr', ['dispatch', 'put', workspace, dispatch, '--path', path], { stdin: content });
+    await stageDispatchFile(workspace, workspacePath, dispatch, path, content);
   }
   await run('heimr', ['dispatch', 'seal', workspace, dispatch]);
 }
@@ -83,72 +93,37 @@ function prCommand(repo: RepoConfig): string {
     : '`gh pr create --draft --base ' + repo.trunk + '`';
 }
 
-function buildWorkMd(ticket: Ticket, repo: RepoConfig): string {
-  const verify = repo.verify;
-  return `# ${ticket.title}
-
-## Goal
-Implement skald ticket ${ticket.id} in this repository so that every acceptance criterion below holds.${ticket.link ? `\nTracker: ${ticket.link}` : ''}
-
-## Acceptance criteria
-${ticket.acceptanceCriteria}
-
-## Constraints
-- Change only this repository. A missing fact is a blocker to report in HANDOFF.json, not something to guess.
-- Commit on branch \`${ticket.id}\`; push it to \`origin\`.
-- No plans, notes, or summaries in the repository: the diff is the deliverable.
-- Commit subjects: \`type(scope): description\`, body wrapped at 72 columns, referencing ${ticket.id}.
-
-## Verification
-\`\`\`sh
-${verify}
-\`\`\`
-All of it must pass before the handoff is marked complete.
-
-## Deliverable
-- Branch \`${ticket.id}\` pushed to origin.
-- A draft PR opened with ${prCommand(repo)} (body ≤ 10 lines: one sentence, ≤ 4 bullets, one "Verified:" line).
-- HANDOFF.json kept current, shape:
-  \`{"version":1,"status":"complete"|"partial"|"escalated","branch":"…","commit":"…","pr":"<url>|null","summary":"…","acceptance_criteria":[{"criterion":"…","status":"done"|"partial"|"not-started","evidence":"…"}],"blockers":["…"],"escalation":"…"|null}\`
-
-## Escalation
-Try to resolve blockers yourself first. If a blocker cannot be resolved within this task's scope —
-the acceptance criteria assume something untrue, a decision belongs to a human, a tool or network
-policy makes a criterion impossible here — stop, commit and push what is sound, and set
-\`"status":"escalated"\` with \`"escalation"\` stating the problem and the decision or change needed.
-The ticket goes back to refining for a human; do not keep retrying or narrow the criteria yourself.
-`;
+// heimr owns the agent prompt text; styrir only substitutes the tokens its WORK.md scaffold
+// declares. A token this repo does not supply is left as `{{token}}` verbatim — no other
+// templating, per the styrir/heimr inbox contract.
+async function renderTemplate(kind: 'build' | 'review', tokens: Record<string, string>): Promise<string> {
+  const { stdout } = await run('heimr', ['template', kind]);
+  return stdout.replace(/\{\{(\w+)\}\}/g, (match, name: string) => (name in tokens ? tokens[name] : match));
 }
 
-function reviewWorkMd(ticket: Ticket, branch: string): string {
-  return `# ${ticket.title} (review)
-
-## Frame
-Branch \`${branch}\` implements skald ticket ${ticket.id}. The diff against trunk is in the dispatch as \`target.diff\`; the worktree is checked out at the branch tip. Review the diff against the acceptance criteria and checklist only.
-
-## Acceptance criteria
-${ticket.acceptanceCriteria}
-
-## Review checklist
-- Design / readability / correctness: fits the existing architecture, idiomatic, no correctness bugs.
-- Production safety: failure modes, partial failure, concurrency, bad data, observability, rollback.
-- AC fit: map each criterion to covered / partial / missing; flag scope drift.
-- Severity: blocking / should-fix / nit, each tied to \`path:line\`. Documentation findings are nits unless grossly misleading. A nit is genuinely optional.
-- Verdict follows severity mechanically: approve only when there is nothing above nit.
-
-## Read-only boundary
-Do not modify the repository or worktree, push, comment on the PR, or touch any ticket state. Findings only.
-
-## Expected HANDOFF.json shape
-\`{"version":1,"status":"complete","verdict":"approve"|"request-changes","summary":"…","acceptance_criteria":[{"criterion":"…","status":"done"|"partial"|"missing","evidence":"…"}],"findings":[{"severity":"blocking"|"should-fix"|"nit","description":"…","path":"…","line":0}]}\`
-`;
+function buildTokens(ticket: Ticket, repo: RepoConfig): Record<string, string> {
+  return {
+    title: ticket.title,
+    ticket_id: ticket.id,
+    tracker: ticket.link ?? '',
+    acceptance_criteria: ticket.acceptanceCriteria,
+    branch: ticket.id,
+    trunk: repo.trunk,
+    verify: repo.verify,
+    pr_command: prCommand(repo),
+    pr: ticket.pr ?? '',
+  };
 }
 
-function findingsMarkdown(findings: Finding[]): string {
-  const lines = findings.map((f) =>
-    `- **${f.severity}**${f.path ? ` \`${f.path}${f.line ? `:${f.line}` : ''}\`` : ''} — ${f.description}`,
-  );
-  return `# Review findings to address\n\nFix every blocking and should-fix finding. Nits are optional; say in HANDOFF.json which you took and which you left. Then re-run verification, commit, push, and update the PR.\n\n${lines.join('\n')}\n`;
+function reviewTokens(ticket: Ticket, repo: RepoConfig, branch: string): Record<string, string> {
+  return {
+    title: ticket.title,
+    ticket_id: ticket.id,
+    acceptance_criteria: ticket.acceptanceCriteria,
+    branch,
+    trunk: repo.trunk,
+    pr: ticket.pr ?? '',
+  };
 }
 
 // One build workspace per ticket for the whole `building` lifetime: a review round that
@@ -159,7 +134,6 @@ export const heimrPrepareBuild = hatchet.task({
   fn: logged(async (input: {
     ticket: Ticket;
     dispatch: string;
-    findings?: Finding[];
     continuation?: string;
   }): Promise<{ workspace: string; workspacePath: string; dispatch: string }> => {
     const repo = repoConfig(input.ticket.repo);
@@ -169,7 +143,7 @@ export const heimrPrepareBuild = hatchet.task({
     if (!existsSync(`${path}/WORK.md`)) {
       await run('heimr', ['new', workspace]);
       await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
-        stdin: buildWorkMd(input.ticket, repo),
+        stdin: await renderTemplate('build', buildTokens(input.ticket, repo)),
       });
       await run('heimr', ['repo', 'prepare', workspace, '--from', repo.checkout]);
       await run('heimr', ['repo', 'set-push-remote', workspace, '--url', repo.pushUrl]);
@@ -178,9 +152,22 @@ export const heimrPrepareBuild = hatchet.task({
     // Re-entrant: a replayed or respawned run finds its dispatch already sealed and moves on.
     if (!existsSync(`${path}/dispatches/${input.dispatch}/dispatch.json`)) {
       const inputs: Record<string, string> = { 'container-context.md': await containerContext() };
-      if (input.findings?.length) inputs['review-findings.md'] = findingsMarkdown(input.findings);
       if (input.continuation) inputs['continue.md'] = input.continuation;
-      await sealDispatch(workspace, input.dispatch, inputs);
+      // A rework round's primary dispatch (never a continuation) carries the review round that
+      // sent it back, verbatim, so the worker sees the judged findings themselves rather than a
+      // styrir paraphrase of them.
+      const primaryRound = parsePrimaryRound(input.dispatch);
+      if (primaryRound !== null && primaryRound > 1) {
+        const priorReviewRound = primaryRound - 1;
+        const { stdout: handoff } = await run('heimr', [
+          'dispatch',
+          'handoff',
+          `${input.ticket.id}-review-${priorReviewRound}`,
+          'review',
+        ]);
+        inputs[`inbox/review-${priorReviewRound}.handoff.json`] = handoff;
+      }
+      await sealDispatch(workspace, path, input.dispatch, inputs);
     }
 
     await run('heimr', ['check', workspace]);
@@ -213,10 +200,10 @@ export const heimrPrepareReview = hatchet.task({
     if (!existsSync(`${path}/dispatches/review/dispatch.json`)) {
       await run('heimr', ['new', workspace]);
       await run('heimr', ['work', 'set', workspace, '--from', '/dev/stdin'], {
-        stdin: reviewWorkMd(input.ticket, branch),
+        stdin: await renderTemplate('review', reviewTokens(input.ticket, repo, branch)),
       });
       await run('heimr', ['repo', 'prepare', workspace, '--from', buildRepo]);
-      await sealDispatch(workspace, 'review', {
+      await sealDispatch(workspace, path, 'review', {
         'container-context.md': await containerContext(),
         'target.diff': diff,
       });
@@ -260,33 +247,22 @@ export const heimrBuildRounds = hatchet.task({
   }),
 });
 
-// The durable findings for a rework round: the actionable findings from the review round that
-// just judged the completed build (if one ran), plus any human note left by `styrir signal
-// rework`. Never trust an in-memory value for this — it must be reconstructable by a process
-// that has no memory of the round that just finished, which is the whole point of a respawn fix.
-export const heimrResolveRework = hatchet.task({
-  name: 'heimr-resolve-rework',
-  fn: logged(async (input: { ticketId: string; buildWorkspacePath: string; completedRound: number }): Promise<{ findings: Finding[] }> => {
-    const findings: Finding[] = [];
-    try {
-      const { stdout } = await run('heimr', ['dispatch', 'handoff', `${input.ticketId}-review-${input.completedRound}`, 'review']);
-      const handoff = JSON.parse(stdout) as ReviewHandoff;
-      for (const f of handoff.findings ?? []) {
-        if (f.severity === 'blocking' || f.severity === 'should-fix') findings.push(f);
-      }
-    } catch {
-      // No completed review round on record — e.g. rework was requested before any review ran.
-    }
-
-    const noteFile = pendingReworkPath(input.buildWorkspacePath);
-    if (existsSync(noteFile)) {
-      const data = JSON.parse(readFileSync(noteFile, 'utf8')) as { note?: string };
-      if (data.note) findings.push({ severity: 'should-fix', description: `Ian: ${data.note}` });
-      rmSync(noteFile); // consume once: it must not also feed a later round
-    }
-    return { findings };
-  }),
-});
+// The dispatch that a build round `N` starting *now* would seal: one past the highest round the
+// workspace has ever recorded. Used by `styrir signal rework` to stage a human note into that
+// round's dispatch ahead of the round itself existing, and it is the same derivation `resolveEntryState`
+// makes for a respawned run, so the two never disagree about which round a note lands in.
+export async function nextBuildDispatch(ticketId: string): Promise<{ workspace: string; workspacePath: string; dispatch: string }> {
+  const workspace = `${ticketId}-build`;
+  const workspacePath = await resolveWorkspacePath(workspace);
+  if (!existsSync(`${workspacePath}/WORK.md`)) {
+    throw new Error(`no build workspace for ${ticketId} yet; nothing to rework`);
+  }
+  const rounds = listDispatches(workspacePath)
+    .map(parsePrimaryRound)
+    .filter((r): r is number => r !== null);
+  const nextRound = (rounds.length ? Math.max(...rounds) : 0) + 1;
+  return { workspace, workspacePath, dispatch: primaryDispatchName(nextRound) };
+}
 
 export type BuildHandoff = {
   version: number;
