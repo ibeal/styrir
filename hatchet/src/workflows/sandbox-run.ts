@@ -2,9 +2,10 @@ import type { JsonObject } from '@hatchet-dev/typescript-sdk';
 import { ConcurrencyLimitStrategy } from '@hatchet-dev/typescript-sdk';
 import type { DurableContext } from '@hatchet-dev/typescript-sdk';
 import { hatchet } from '../client.js';
-import { config } from '../config.js';
+import { config, resolveModel, statusForKind } from '../config.js';
 import { gardrCleanup, gardrObserve, gardrStart } from '../tasks/gardr.js';
 import { heimrHandoff } from '../tasks/heimr.js';
+import { skaldLog } from '../tasks/skald.js';
 
 export type SandboxRunInput = {
   workspace: string;
@@ -12,6 +13,10 @@ export type SandboxRunInput = {
   dispatch: string;
   spec: string;
   kind: 'build' | 'review';
+  ticketId: string;
+  repo: string;
+  complexity: number | null;
+  provider: string | null;
 };
 
 export type SandboxRunOutput = {
@@ -35,10 +40,24 @@ export const sandboxRun = hatchet.durableTask({
     limitStrategy: ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
   },
   fn: async (input: SandboxRunInput, ctx: DurableContext<SandboxRunInput>): Promise<SandboxRunOutput> => {
+    // A missing tier, unknown provider, or a status with no default fails the run outright —
+    // never silently falls back to whatever model the gardr spec pins.
+    const { tier, provider, model } = resolveModel({
+      repoSlug: input.repo,
+      status: statusForKind(input.kind),
+      complexity: input.complexity,
+      provider: input.provider,
+    });
+    await skaldLog.run({
+      ticketId: input.ticketId,
+      entry: `sandbox ${input.kind}: tier ${tier}, provider ${provider}, model ${model}`,
+    });
+
     const { runId } = await gardrStart.run({
       workspacePath: input.workspacePath,
       spec: input.spec,
       kind: input.kind,
+      model,
     });
 
     let observed = await gardrObserve.run({ runId });

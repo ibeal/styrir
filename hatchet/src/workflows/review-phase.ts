@@ -46,6 +46,10 @@ export const reviewPhase = hatchet.durableTask({
         dispatch: prepared.dispatch,
         spec: repo.reviewSpec,
         kind: 'review',
+        ticketId: ticket.id,
+        repo: ticket.repo,
+        complexity: ticket.complexity,
+        provider: ticket.provider,
       });
       runId = result.runId;
       handoff = result.handoff as ReviewHandoff | null;

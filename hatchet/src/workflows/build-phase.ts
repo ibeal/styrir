@@ -65,6 +65,10 @@ export const buildPhase = hatchet.durableTask({
           dispatch,
           spec: repo.buildSpec,
           kind: 'build',
+          ticketId: ticket.id,
+          repo: ticket.repo,
+          complexity: ticket.complexity,
+          provider: ticket.provider,
         });
         runId = result.runId;
         handoff = result.handoff as BuildHandoff | null;
