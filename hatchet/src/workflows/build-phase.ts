@@ -13,6 +13,11 @@ import {
 } from '../tasks/heimr.js';
 import { skaldLog, skaldRead, skaldSet, type Ticket } from '../tasks/skald.js';
 import { sandboxRun } from './sandbox-run.js';
+import {
+  buildAttemptDisposition,
+  buildTicketPointers,
+  normalizeBuildProblems,
+} from './build-phase-state.js';
 
 export type BuildPhaseInput = {
   ticket: Ticket;
@@ -55,6 +60,7 @@ export const buildPhase = hatchet.durableTask({
     // continuation never reuses a name a prior process already sealed.
     const active = await heimrActiveDispatch.run({ workspacePath: prepared.workspacePath, primary });
     let dispatch = active.dispatch;
+    let previousProblems: string[] | null = null;
 
     for (let attempt = active.attempt; ; attempt++) {
       // Reconcile before spending a sandbox: a respawned run whose worker already finished
@@ -106,7 +112,7 @@ export const buildPhase = hatchet.durableTask({
           ticketId: ticket.id,
           status: 'refining',
           paused: 'escalated by build worker; waiting for human review',
-          ...(git.onTrunk ? {} : { branch: git.branch }),
+          ...buildTicketPointers(git, handoff),
         });
         await skaldLog.run({
           ticketId: ticket.id,
@@ -134,16 +140,51 @@ export const buildPhase = hatchet.durableTask({
         return { ok: true, escalated: false, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.branch, pr: handoff!.pr!, reason: null };
       }
 
-      if (!humanResumed && attempt >= config.maxBuildContinuations) {
-        return {
-          ok: false,
-          escalated: false,
-          workspace: prepared.workspace,
-          workspacePath: prepared.workspacePath,
-          branch: git.onTrunk ? null : git.branch,
-          pr: handoff?.pr ?? null,
-          reason: problems.join('; '),
-        };
+      if (!humanResumed) {
+        const disposition = buildAttemptDisposition(
+          problems,
+          previousProblems,
+          attempt,
+          config.maxBuildContinuations,
+        );
+        if (disposition === 'no-progress') {
+          const reason = `no progress after continuation: ${problems.join('; ')}`;
+          await skaldSet.run({
+            ticketId: ticket.id,
+            status: 'refining',
+            paused: 'build continuation made no progress; waiting for human review',
+            ...buildTicketPointers(git, handoff),
+          });
+          await skaldLog.run({
+            ticketId: ticket.id,
+            entry: `build round ${input.round} attempt ${attempt + 1} (gardr ${runId}): escalated to refining — ${reason}`,
+          });
+          return {
+            ok: false,
+            escalated: true,
+            workspace: prepared.workspace,
+            workspacePath: prepared.workspacePath,
+            branch: git.onTrunk ? null : git.branch,
+            pr: handoff?.pr ?? null,
+            reason,
+          };
+        }
+        if (disposition === 'max-continuations') {
+          await skaldSet.run({
+            ticketId: ticket.id,
+            ...buildTicketPointers(git, handoff),
+          });
+          return {
+            ok: false,
+            escalated: false,
+            workspace: prepared.workspace,
+            workspacePath: prepared.workspacePath,
+            branch: git.onTrunk ? null : git.branch,
+            pr: handoff?.pr ?? null,
+            reason: problems.join('; '),
+          };
+        }
+        previousProblems = normalizeBuildProblems(problems);
       }
 
       dispatch = continuationDispatchName(primary, attempt + 1);
