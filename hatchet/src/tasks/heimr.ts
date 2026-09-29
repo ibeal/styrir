@@ -36,12 +36,38 @@ export function parsePrimaryRound(dispatchName: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-function listDispatches(workspacePath: string): string[] {
+function isSealed(workspacePath: string, dispatch: string): boolean {
+  return existsSync(`${workspacePath}/dispatches/${dispatch}/dispatch.json`);
+}
+
+// Only sealed dispatches record a round or attempt. An unsealed directory is a note that
+// `styrir signal rework` staged ahead of its dispatch, not evidence that the dispatch ran.
+function listSealedDispatches(workspacePath: string): string[] {
   try {
-    return readdirSync(`${workspacePath}/dispatches`);
+    return readdirSync(`${workspacePath}/dispatches`).filter((name) => isSealed(workspacePath, name));
   } catch {
     return [];
   }
+}
+
+function highestSealedRound(workspacePath: string): number {
+  const rounds = listSealedDispatches(workspacePath)
+    .map(parsePrimaryRound)
+    .filter((r): r is number => r !== null);
+  return rounds.length ? Math.max(...rounds) : 0;
+}
+
+function latestAttempt(workspacePath: string, primary: string): number {
+  const prefix = `${primary}-continue-`;
+  const attempts = listSealedDispatches(workspacePath)
+    .filter((n) => n.startsWith(prefix))
+    .map((n) => Number(n.slice(prefix.length)))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return attempts.length ? Math.max(...attempts) : 0;
+}
+
+export function continuationDispatchName(primary: string, attempt: number): string {
+  return `${primary}-continue-${attempt}`;
 }
 
 // `rata only profile container` is the standing sandboxed-worker protocol. The header
@@ -66,7 +92,7 @@ export async function stageDispatchFile(
   path: string,
   content: string,
 ): Promise<void> {
-  if (existsSync(`${workspacePath}/dispatches/${dispatch}/dispatch.json`)) {
+  if (isSealed(workspacePath, dispatch)) {
     throw new Error(`dispatch ${dispatch} in workspace ${workspace} is already sealed; too late to add ${path}`);
   }
   if (!existsSync(`${workspacePath}/dispatches/${dispatch}`)) {
@@ -155,22 +181,21 @@ export const heimrPrepareBuild = hatchet.task({
     }
 
     // Re-entrant: a replayed or respawned run finds its dispatch already sealed and moves on.
-    if (!existsSync(`${path}/dispatches/${input.dispatch}/dispatch.json`)) {
+    if (!isSealed(path, input.dispatch)) {
       const inputs: Record<string, string> = { 'container-context.md': await containerContext() };
       if (input.continuation) inputs['continue.md'] = input.continuation;
       // A rework round's primary dispatch (never a continuation) carries the review round that
       // sent it back, verbatim, so the worker sees the judged findings themselves rather than a
-      // styrir paraphrase of them.
+      // styrir paraphrase of them. A human-requested rework can start a round no review sent
+      // back; that round has no review handoff to carry.
       const primaryRound = parsePrimaryRound(input.dispatch);
       if (primaryRound !== null && primaryRound > 1) {
         const priorReviewRound = primaryRound - 1;
-        const { stdout: handoff } = await run('heimr', [
-          'dispatch',
-          'handoff',
-          `${input.ticket.id}-review-${priorReviewRound}`,
-          'review',
-        ]);
-        inputs[`inbox/review-${priorReviewRound}.handoff.json`] = handoff;
+        const reviewWorkspace = `${input.ticket.id}-review-${priorReviewRound}`;
+        if (isSealed(await resolveWorkspacePath(reviewWorkspace), 'review')) {
+          const { stdout: handoff } = await run('heimr', ['dispatch', 'handoff', reviewWorkspace, 'review']);
+          inputs[`inbox/review-${priorReviewRound}.handoff.json`] = handoff;
+        }
       }
       await sealDispatch(workspace, path, input.dispatch, inputs);
     }
@@ -214,7 +239,7 @@ export const heimrPrepareReview = hatchet.task({
     if (isNewWorkspace) {
       await run('heimr', ['repo', 'prepare', workspace, '--from', buildRepo]);
     }
-    if (!existsSync(`${path}/dispatches/review/dispatch.json`)) {
+    if (!isSealed(path, 'review')) {
       await sealDispatch(workspace, path, 'review', {
         'container-context.md': await containerContext(),
         'target.diff': diff,
@@ -226,20 +251,21 @@ export const heimrPrepareReview = hatchet.task({
 });
 
 // What a build round's active dispatch is *right now*: the primary (`build`/`rework-N`) if no
-// continuation of it exists yet, otherwise the highest-numbered `*-continue-N` of that primary.
+// sealed continuation of it exists yet, otherwise the highest-numbered sealed `*-continue-N`.
 // Derived from disk every call, so a brand-new process (a respawn, not a replay) resumes the
 // same attempt count a prior process left off at instead of re-using attempt 0 and risking a
 // dispatch name collision with a continuation the prior process already sealed.
+// `nextStaged` means `styrir signal rework` has already put a note into the next continuation.
 export const heimrActiveDispatch = hatchet.task({
   name: 'heimr-active-dispatch',
-  fn: logged(async (input: { workspacePath: string; primary: string }): Promise<{ dispatch: string; attempt: number }> => {
-    const prefix = `${input.primary}-continue-`;
-    const attempts = listDispatches(input.workspacePath)
-      .filter((n) => n.startsWith(prefix))
-      .map((n) => Number(n.slice(prefix.length)))
-      .filter((n) => Number.isInteger(n) && n > 0);
-    const attempt = attempts.length ? Math.max(...attempts) : 0;
-    return { dispatch: attempt > 0 ? `${prefix}${attempt}` : input.primary, attempt };
+  fn: logged(async (input: { workspacePath: string; primary: string }): Promise<{ dispatch: string; attempt: number; nextStaged: boolean }> => {
+    const attempt = latestAttempt(input.workspacePath, input.primary);
+    const next = continuationDispatchName(input.primary, attempt + 1);
+    return {
+      dispatch: attempt > 0 ? continuationDispatchName(input.primary, attempt) : input.primary,
+      attempt,
+      nextStaged: existsSync(`${input.workspacePath}/dispatches/${next}`),
+    };
   }),
 });
 
@@ -251,7 +277,7 @@ export const heimrBuildRounds = hatchet.task({
     const workspace = `${input.ticketId}-build`;
     const path = await resolveWorkspacePath(workspace);
     if (!existsSync(`${path}/WORK.md`)) return { workspace, workspacePath: null, rounds: [] };
-    const rounds = listDispatches(path)
+    const rounds = listSealedDispatches(path)
       .map(parsePrimaryRound)
       .filter((r): r is number => r !== null)
       .sort((a, b) => a - b);
@@ -259,21 +285,30 @@ export const heimrBuildRounds = hatchet.task({
   }),
 });
 
-// The dispatch that a build round `N` starting *now* would seal: one past the highest round the
-// workspace has ever recorded. Used by `styrir signal rework` to stage a human note into that
-// round's dispatch ahead of the round itself existing, and it is the same derivation `resolveEntryState`
-// makes for a respawned run, so the two never disagree about which round a note lands in.
+// The build dispatch that runs next, so `styrir signal rework` can stage a human note into it
+// before it exists. If the active dispatch's handoff is complete, that is the next round's
+// primary; otherwise the round is unfinished (escalated, partial, or never handed off) and the
+// note goes into its next continuation. `resolveEntryState` and `buildPhase` make the same
+// choice, so the note lands in the dispatch that is actually sealed next.
 export async function nextBuildDispatch(ticketId: string): Promise<{ workspace: string; workspacePath: string; dispatch: string }> {
   const workspace = `${ticketId}-build`;
   const workspacePath = await resolveWorkspacePath(workspace);
   if (!existsSync(`${workspacePath}/WORK.md`)) {
     throw new Error(`no build workspace for ${ticketId} yet; nothing to rework`);
   }
-  const rounds = listDispatches(workspacePath)
-    .map(parsePrimaryRound)
-    .filter((r): r is number => r !== null);
-  const nextRound = (rounds.length ? Math.max(...rounds) : 0) + 1;
-  return { workspace, workspacePath, dispatch: primaryDispatchName(nextRound) };
+  const round = highestSealedRound(workspacePath);
+  if (round === 0) return { workspace, workspacePath, dispatch: primaryDispatchName(1) };
+  const primary = primaryDispatchName(round);
+  const attempt = latestAttempt(workspacePath, primary);
+  const active = attempt > 0 ? continuationDispatchName(primary, attempt) : primary;
+  let status: string | undefined;
+  try {
+    status = (JSON.parse((await run('heimr', ['dispatch', 'handoff', workspace, active])).stdout) as BuildHandoff).status;
+  } catch {
+    status = undefined;
+  }
+  const dispatch = status === 'complete' ? primaryDispatchName(round + 1) : continuationDispatchName(primary, attempt + 1);
+  return { workspace, workspacePath, dispatch };
 }
 
 export type BuildHandoff = {

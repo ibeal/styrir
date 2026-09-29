@@ -28,9 +28,10 @@ export const reviewPhase = hatchet.durableTask({
     const repo = repoConfig(ticket.repo);
 
     // Re-read fresh every time this round's review is prepared, never the object read at run
-    // start, so WORK.md reflects the ticket's current AC.
+    // start, so WORK.md reflects the ticket's current AC. The same read drives model selection.
+    const fresh = await skaldRead.run({ ticketId: ticket.id });
     const prepared = await heimrPrepareReview.run({
-      ticket: await skaldRead.run({ ticketId: ticket.id }),
+      ticket: fresh,
       round: input.round,
       buildWorkspacePath: input.buildWorkspacePath,
     });
@@ -50,8 +51,8 @@ export const reviewPhase = hatchet.durableTask({
         kind: 'review',
         ticketId: ticket.id,
         repo: ticket.repo,
-        complexity: ticket.complexity,
-        provider: ticket.provider,
+        complexity: fresh.complexity,
+        provider: fresh.provider,
       });
       runId = result.runId;
       handoff = result.handoff as ReviewHandoff | null;

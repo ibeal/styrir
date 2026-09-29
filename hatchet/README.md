@@ -43,15 +43,19 @@ whether to build at all from those two things at the top of `sdlc-ticket` — ne
 variable seeded to `1`. The dispatch names carry the round (`build` = round 1, `rework-N` = round
 N, `<primary>-continue-N` = an attempt within a round) precisely so a fresh process can read them
 back off disk and recover where the last one left off, and never reseal a name a prior process
-already used.
+already used. Only **sealed** dispatches count; an unsealed directory is a staged note, not a run.
 
-`styrir signal <id> rework "<note>"` stages the note as `inbox/human-note.md` in the *next* build
-round's dispatch — created early via `heimr dispatch new`/`dispatch put` if it doesn't exist yet,
-never a raw write into the workspace — then unparks the ticket, so it works whether or not a run is
+`styrir signal <id> rework "<note>"` stages the note as `inbox/human-note.md` in the dispatch that
+runs next: the next round's primary if the active dispatch's handoff is `complete`, otherwise the
+current round's next `*-continue-N` (an escalated or unfinished round is answered in place, not
+skipped past). `build-phase` sees that staged continuation — or an active dispatch that already
+escalated — and seals the continuation instead of rerunning the old dispatch. It is created early via
+`heimr dispatch new`/`dispatch put` if it doesn't exist yet, never a raw write into the workspace — then unparks the ticket, so it works whether or not a run is
 currently alive to catch the `ticket:signal` event. That dispatch is exactly the one
 `heimr-prepare-build` seals when the round actually starts, live or respawned, so it just adds its
-usual inputs (`container-context.md`, and `inbox/review-<round>.handoff.json` — the prior review
-round's HANDOFF.json verbatim) to what's already staged there and seals once.
+usual inputs (`container-context.md`, `continue.md` for a continuation, and
+`inbox/review-<round>.handoff.json` — the prior review round's HANDOFF.json verbatim, when that
+review ran) to what's already staged there and seals once.
 
 A fresh run's resolved mode and reason go into the skald log as one line
 (`hatchet: resumed — mode <mode> (round <n>): <reason>`), so a human reading the ticket's log

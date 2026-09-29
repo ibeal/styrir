@@ -7,6 +7,7 @@ import {
   heimrActiveDispatch,
   heimrHandoff,
   heimrPrepareBuild,
+  continuationDispatchName,
   primaryDispatchName,
   type BuildHandoff,
 } from '../tasks/heimr.js';
@@ -40,7 +41,10 @@ export const buildPhase = hatchet.durableTask({
 
     // Re-read fresh every time a dispatch is prepared, never the object read at run start, so
     // WORK.md reflects the ticket's current AC and `pr` even on a later continuation or rework.
-    let prepared = await heimrPrepareBuild.run({ ticket: await skaldRead.run({ ticketId: ticket.id }), dispatch: primary });
+    // The same fresh read also drives model selection, so a complexity/provider change applies
+    // from the next dispatch rather than the next workflow run.
+    let fresh = await skaldRead.run({ ticketId: ticket.id });
+    let prepared = await heimrPrepareBuild.run({ ticket: fresh, dispatch: primary });
     await skaldLog.run({
       ticketId: ticket.id,
       entry: `build round ${input.round}: sealed dispatch ${primary} in heimr workspace ${prepared.workspace}`,
@@ -60,7 +64,21 @@ export const buildPhase = hatchet.durableTask({
       let problems = buildProblems(handoff, git, repo.trunk);
       let runId = 'skipped; prior run already complete';
 
-      if (problems.length > 0) {
+      // A human has answered this round's active dispatch: either a rework note is already staged
+      // into the next continuation, or the active dispatch escalated and the ticket was sent back
+      // to building. Running that dispatch again would replay the question, not the answer, so
+      // seal the next continuation instead. The attempt cap does not apply to a human's answer.
+      const humanResumed =
+        attempt === active.attempt && (active.nextStaged || handoff?.status === 'escalated');
+
+      if (humanResumed) {
+        await skaldLog.run({
+          ticketId: ticket.id,
+          entry:
+            `build round ${input.round}: ${dispatch} ${active.nextStaged ? 'has a staged note in the next continuation' : 'escalated earlier'}; ` +
+            `sealing ${continuationDispatchName(primary, attempt + 1)} instead of rerunning it`,
+        });
+      } else if (problems.length > 0) {
         const result = await sandboxRun.run({
           workspace: prepared.workspace,
           workspacePath: prepared.workspacePath,
@@ -69,8 +87,8 @@ export const buildPhase = hatchet.durableTask({
           kind: 'build',
           ticketId: ticket.id,
           repo: ticket.repo,
-          complexity: ticket.complexity,
-          provider: ticket.provider,
+          complexity: fresh.complexity,
+          provider: fresh.provider,
         });
         runId = result.runId;
         handoff = result.handoff as BuildHandoff | null;
@@ -82,7 +100,7 @@ export const buildPhase = hatchet.durableTask({
 
       // The worker may decide a blocker is outside its scope. That is a refining problem, not
       // something to retry: hand the ticket back with the reason and stop.
-      if (handoff?.status === 'escalated') {
+      if (!humanResumed && handoff?.status === 'escalated') {
         const reason = handoff.escalation ?? handoff.summary ?? 'no reason given';
         await skaldSet.run({
           ticketId: ticket.id,
@@ -97,14 +115,16 @@ export const buildPhase = hatchet.durableTask({
         return { ok: false, escalated: true, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.onTrunk ? null : git.branch, pr: handoff.pr ?? null, reason };
       }
 
-      await skaldLog.run({
-        ticketId: ticket.id,
-        entry:
-          `build round ${input.round} attempt ${attempt + 1} (gardr ${runId}): ` +
-          (problems.length ? `incomplete — ${problems.join('; ')}` : `complete — ${handoff?.summary ?? ''}`),
-      });
+      if (!humanResumed) {
+        await skaldLog.run({
+          ticketId: ticket.id,
+          entry:
+            `build round ${input.round} attempt ${attempt + 1} (gardr ${runId}): ` +
+            (problems.length ? `incomplete — ${problems.join('; ')}` : `complete — ${handoff?.summary ?? ''}`),
+        });
+      }
 
-      if (problems.length === 0) {
+      if (!humanResumed && problems.length === 0) {
         await skaldSet.run({
           ticketId: ticket.id,
           status: 'reviewing',
@@ -114,7 +134,7 @@ export const buildPhase = hatchet.durableTask({
         return { ok: true, escalated: false, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.branch, pr: handoff!.pr!, reason: null };
       }
 
-      if (attempt >= config.maxBuildContinuations) {
+      if (!humanResumed && attempt >= config.maxBuildContinuations) {
         return {
           ok: false,
           escalated: false,
@@ -126,15 +146,17 @@ export const buildPhase = hatchet.durableTask({
         };
       }
 
-      dispatch = `${primary}-continue-${attempt + 1}`;
+      dispatch = continuationDispatchName(primary, attempt + 1);
+      fresh = await skaldRead.run({ ticketId: ticket.id });
       prepared = await heimrPrepareBuild.run({
-        ticket: await skaldRead.run({ ticketId: ticket.id }),
+        ticket: fresh,
         dispatch,
         continuation:
           `# Continue\n\nThe previous run ended before the task was complete. Surviving work is on branch ` +
           `\`${git.branch}\` in this worktree (${git.ahead} commit(s) ahead of ${repo.trunk}` +
           `${git.dirty ? ', uncommitted changes present' : ''}). Outstanding:\n\n` +
           problems.map((p) => `- ${p}`).join('\n') +
+          (humanResumed ? `\n\nA human has responded to the previous run; read everything under \`inbox/\` first.` : '') +
           `\n\nFinish these, run verification, commit, push, ensure the PR exists, and update HANDOFF.json.\n\n` +
           `If a blocker cannot be resolved within this task's scope (a wrong assumption in the criteria, a decision that ` +
           `belongs to a human, a tool or network policy that makes a criterion impossible here), do not retry: commit and ` +

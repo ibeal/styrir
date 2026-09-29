@@ -5,10 +5,20 @@
   "pollIntervalSeconds": 30,
   "models": {
     "defaultProvider": "anthropic",
-    "defaultComplexity": { "building": 2, "reviewing": 1 },
+    "defaultComplexity": { "building": 1, "reviewing": 2 },
     "tiers": {
-      "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-5", "claude-opus-4-1"],
-      "openai": ["gpt-5-mini", "gpt-5", "gpt-5", "gpt-5-pro"]
+      "anthropic": [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-4-6:high",
+        "anthropic/claude-fable-5"
+      ],
+      "openai": [
+        "openai-codex/gpt-5.3-codex-spark",
+        "openai-codex/gpt-5.5",
+        "openai-codex/gpt-6-luna",
+        "openai-codex/gpt-6-sol"
+      ]
     }
   },
   "repos": {
