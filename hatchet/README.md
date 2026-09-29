@@ -18,7 +18,10 @@ sdlc-ticket <id>             durable; idempotent per ticket id
   │             → git-reconcile → skald set reviewing
   │             (incomplete run ⇒ "continue" dispatch into the same workspace, ≤ maxBuildContinuations;
   │             the continuation number is derived from existing `*-continue-N` dispatches, so a
-  │             respawned attempt can never reseal a name a prior process already used)
+  │             respawned attempt can never reseal a name a prior process already used;
+  │             a continuation that ends with the same problem set as the attempt before it is
+  │             no-progress, not a retry candidate — it escalates to refining immediately, same
+  │             as a worker's own escalation, instead of running to the cap)
   review-phase ─ heimr-prepare-review (new workspace per round, diff+AC+checklist only)
   │             → heimr-handoff (skip the sandbox only if this round's dispatch already judged it)
   │             → sandbox-run
@@ -117,7 +120,13 @@ restate them. Styrir's part of the contract is narrower:
   `human-note.md`. A review dispatch never gets an inbox.
 - `git-reconcile` checks the worktree independently of what a build handoff claims; a worker that
   hits a blocker outside its scope sets `escalated`, and the ticket goes back to `refining`, paused
-  for human review.
+  for human review. `heimr-prepare-build` stages that escalate-don't-retry rule and the handoff's
+  `status`/`escalation` shape as `escalation-policy.md` in every build dispatch, primary and
+  continuation alike, so a worker can escalate on the first dispatch rather than only on a
+  continuation.
+- Every non-success `build-phase` exit — max continuations, no progress, or a rework round left
+  incomplete — writes `branch`/`pr` to the skald ticket whenever git and the handoff have them,
+  same as the success and escalation paths.
 - Verdict/rework routing reads a handoff's `status`/`verdict`/finding `severity` and disk state,
   exactly as before; a handoff's `threads`/`thread_url` fields (PR-thread bookkeeping the
   builder/reviewer own directly on the forge) are not read here.
