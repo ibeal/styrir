@@ -103,6 +103,11 @@ restate them. Styrir's part of the contract is narrower:
 - `heimr-prepare-build`/`heimr-prepare-review` render `WORK.md` by substituting the `{{token}}`
   placeholders `heimr template build|review` declares (title, ticket id, AC, branch, trunk, verify
   command, PR command, PR url) literally; a token this repo doesn't supply is left as-is.
+  `WORK.md` is re-rendered from the current ticket — re-read from skald, never the object read at
+  run start — on every dispatch prepared (primary, rework, and every `*-continue-N`), not only
+  when the workspace is first created; workspace creation, `repo prepare`, and
+  `set-push-remote` still happen only then. It is only ever rewritten while preparing a
+  dispatch, never during `sandbox-run`.
 - A rework build dispatch's `inbox/` holds the judged review round's `HANDOFF.json` verbatim
   (`heimr dispatch handoff` → `heimr dispatch put`) plus, if `styrir signal rework` ran,
   `human-note.md`. A review dispatch never gets an inbox.
