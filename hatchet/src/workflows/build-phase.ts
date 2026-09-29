@@ -13,6 +13,12 @@ import {
 } from '../tasks/heimr.js';
 import { skaldLog, skaldRead, skaldSet, type Ticket } from '../tasks/skald.js';
 import { sandboxRun } from './sandbox-run.js';
+import { decideBuildStep, survivingWork } from './build-phase-logic.js';
+
+export { sameProblems, survivingWork, decideBuildStep, type BuildStepDecision } from './build-phase-logic.js';
+// The plain functions above have no hatchet-client dependency, so tests import them from
+// `build-phase-logic.js` directly; this re-export just keeps `build-phase.ts` the single place
+// other workflow code imports the build-phase surface from.
 
 export type BuildPhaseInput = {
   ticket: Ticket;
@@ -56,6 +62,12 @@ export const buildPhase = hatchet.durableTask({
     const active = await heimrActiveDispatch.run({ workspacePath: prepared.workspacePath, primary });
     let dispatch = active.dispatch;
 
+    // The previous (non-human-resumed) attempt's problem set, so a continuation that ends with
+    // exactly the same problems as the attempt before it is recognized as no progress rather than
+    // spent again up to `maxBuildContinuations`. A human-resumed attempt resets it: the human's
+    // answer is new information, not a repeat.
+    let previousProblems: string[] | null = null;
+
     for (let attempt = active.attempt; ; attempt++) {
       // Reconcile before spending a sandbox: a respawned run whose worker already finished
       // (or a dispatch sealed by a previous, failed run) must not build twice.
@@ -98,23 +110,6 @@ export const buildPhase = hatchet.durableTask({
         if (!handoff && result.stderrTail) problems.push(`gardr stderr: ${result.stderrTail}`);
       }
 
-      // The worker may decide a blocker is outside its scope. That is a refining problem, not
-      // something to retry: hand the ticket back with the reason and stop.
-      if (!humanResumed && handoff?.status === 'escalated') {
-        const reason = handoff.escalation ?? handoff.summary ?? 'no reason given';
-        await skaldSet.run({
-          ticketId: ticket.id,
-          status: 'refining',
-          paused: 'escalated by build worker; waiting for human review',
-          ...(git.onTrunk ? {} : { branch: git.branch }),
-        });
-        await skaldLog.run({
-          ticketId: ticket.id,
-          entry: `build round ${input.round} attempt ${attempt + 1} (gardr ${runId}): escalated to refining — ${reason}`,
-        });
-        return { ok: false, escalated: true, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.onTrunk ? null : git.branch, pr: handoff.pr ?? null, reason };
-      }
-
       if (!humanResumed) {
         await skaldLog.run({
           ticketId: ticket.id,
@@ -124,7 +119,33 @@ export const buildPhase = hatchet.durableTask({
         });
       }
 
-      if (!humanResumed && problems.length === 0) {
+      const decision = decideBuildStep({
+        humanResumed,
+        handoffStatus: handoff?.status,
+        escalationReason: handoff?.escalation ?? handoff?.summary ?? 'no reason given',
+        problems,
+        previousProblems,
+        attempt,
+        maxContinuations: config.maxBuildContinuations,
+      });
+
+      // The worker may decide a blocker is outside its scope. That is a refining problem, not
+      // something to retry: hand the ticket back with the reason and stop.
+      if (decision.action === 'escalate-worker') {
+        await skaldSet.run({
+          ticketId: ticket.id,
+          status: 'refining',
+          paused: 'escalated by build worker; waiting for human review',
+          ...survivingWork(git, handoff),
+        });
+        await skaldLog.run({
+          ticketId: ticket.id,
+          entry: `build round ${input.round} attempt ${attempt + 1} (gardr ${runId}): escalated to refining — ${decision.reason}`,
+        });
+        return { ok: false, escalated: true, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.onTrunk ? null : git.branch, pr: handoff?.pr ?? null, reason: decision.reason };
+      }
+
+      if (decision.action === 'success') {
         await skaldSet.run({
           ticketId: ticket.id,
           status: 'reviewing',
@@ -134,7 +155,28 @@ export const buildPhase = hatchet.durableTask({
         return { ok: true, escalated: false, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.branch, pr: handoff!.pr!, reason: null };
       }
 
-      if (!humanResumed && attempt >= config.maxBuildContinuations) {
+      // A continuation that ends with the same problems as the attempt before it is not making
+      // progress that another continuation would fix — treat it like a worker escalation instead
+      // of running up to `maxBuildContinuations`.
+      if (decision.action === 'escalate-no-progress') {
+        await skaldSet.run({
+          ticketId: ticket.id,
+          status: 'refining',
+          paused: 'no progress across build continuations; waiting for human review',
+          ...survivingWork(git, handoff),
+        });
+        await skaldLog.run({
+          ticketId: ticket.id,
+          entry: `build round ${input.round} attempt ${attempt + 1} (gardr ${runId}): escalated to refining — ${decision.reason}`,
+        });
+        return { ok: false, escalated: true, workspace: prepared.workspace, workspacePath: prepared.workspacePath, branch: git.onTrunk ? null : git.branch, pr: handoff?.pr ?? null, reason: decision.reason };
+      }
+
+      if (decision.action === 'max-continuations') {
+        const persist = survivingWork(git, handoff);
+        if (persist.branch !== undefined || persist.pr !== undefined) {
+          await skaldSet.run({ ticketId: ticket.id, ...persist });
+        }
         return {
           ok: false,
           escalated: false,
@@ -142,9 +184,11 @@ export const buildPhase = hatchet.durableTask({
           workspacePath: prepared.workspacePath,
           branch: git.onTrunk ? null : git.branch,
           pr: handoff?.pr ?? null,
-          reason: problems.join('; '),
+          reason: decision.reason,
         };
       }
+
+      previousProblems = humanResumed ? null : problems;
 
       dispatch = continuationDispatchName(primary, attempt + 1);
       fresh = await skaldRead.run({ ticketId: ticket.id });
@@ -157,11 +201,8 @@ export const buildPhase = hatchet.durableTask({
           `${git.dirty ? ', uncommitted changes present' : ''}). Outstanding:\n\n` +
           problems.map((p) => `- ${p}`).join('\n') +
           (humanResumed ? `\n\nA human has responded to the previous run; read everything under \`inbox/\` first.` : '') +
-          `\n\nFinish these, run verification, commit, push, ensure the PR exists, and update HANDOFF.json.\n\n` +
-          `If a blocker cannot be resolved within this task's scope (a wrong assumption in the criteria, a decision that ` +
-          `belongs to a human, a tool or network policy that makes a criterion impossible here), do not retry: commit and ` +
-          `push what is sound, then set \`"status":"escalated"\` and \`"escalation":"<problem and the decision needed>"\` ` +
-          `in HANDOFF.json. The ticket returns to refining for a human.\n`,
+          `\n\nFinish these, run verification, commit, push, ensure the PR exists, and update HANDOFF.json. ` +
+          `See \`escalation-policy.md\` if a blocker turns out to be outside this task's scope.\n`,
       });
     }
   },
