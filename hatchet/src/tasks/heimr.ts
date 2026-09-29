@@ -113,6 +113,20 @@ async function sealDispatch(
   await run('heimr', ['dispatch', 'seal', workspace, dispatch]);
 }
 
+// Staged into every build dispatch — primary and continuation alike — so a worker can escalate
+// on the first dispatch rather than only after `build-phase` has already spent a continuation
+// spelling this out in `continue.md`. Never staged for review: reviewers judge, they don't build.
+const ESCALATION_POLICY = `# Escalating a blocker
+
+` +
+  `HANDOFF.json's \`"status"\` may be \`"complete"\`, \`"partial"\`, or \`"escalated"\`, with an ` +
+  `\`"escalation"\` field explaining why. If a blocker cannot be resolved within this task's scope ` +
+  `— a wrong assumption in the acceptance criteria, a decision that belongs to a human, or a tool ` +
+  `or network policy that makes a criterion impossible here — do not retry. Commit and push what ` +
+  `is sound, then set \`"status":"escalated"\` and \`"escalation":"<problem and the decision ` +
+  `needed>"\` in HANDOFF.json and stop. This applies on the very first dispatch, not only on a ` +
+  `continuation: the ticket goes back to refining for a human either way.\n`;
+
 function prCommand(repo: RepoConfig): string {
   return repo.forge === 'azure-devops'
     ? '`az repos pr create --draft --target-branch ' + repo.trunk + '`'
@@ -182,7 +196,10 @@ export const heimrPrepareBuild = hatchet.task({
 
     // Re-entrant: a replayed or respawned run finds its dispatch already sealed and moves on.
     if (!isSealed(path, input.dispatch)) {
-      const inputs: Record<string, string> = { 'container-context.md': await containerContext() };
+      const inputs: Record<string, string> = {
+        'container-context.md': await containerContext(),
+        'escalation-policy.md': ESCALATION_POLICY,
+      };
       if (input.continuation) inputs['continue.md'] = input.continuation;
       // A rework round's primary dispatch (never a continuation) carries the review round that
       // sent it back, verbatim, so the worker sees the judged findings themselves rather than a
