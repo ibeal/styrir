@@ -3,6 +3,14 @@
   "maxBuildContinuations": 2,
   "maxConcurrentSandboxes": 2,
   "pollIntervalSeconds": 30,
+  "models": {
+    "defaultProvider": "anthropic",
+    "defaultComplexity": { "building": 2, "reviewing": 1 },
+    "tiers": {
+      "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-5", "claude-opus-4-1"],
+      "openai": ["gpt-5-mini", "gpt-5", "gpt-5", "gpt-5-pro"]
+    }
+  },
   "repos": {
     "styrir": {
       "checkout": "/Users/ian.beal/repos/styrir",
@@ -11,7 +19,8 @@
       "buildSpec": "styrir-building-v2",
       "reviewSpec": "styrir-reviewing",
       "verify": "cargo test && cargo clippy -- -D warnings",
-      "forge": "github"
+      "forge": "github",
+      "defaultComplexity": { "building": 3 }
     },
     "Elevate": {
       "checkout": "/Users/ian.beal/repos/ap/Elevate",

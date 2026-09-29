@@ -15,6 +15,8 @@ export type Ticket = {
   link: string | null;
   parent: string | null;
   acceptanceCriteria: string;
+  complexity: number | null;
+  provider: string | null;
 };
 
 type SkaldListRow = {
@@ -28,6 +30,8 @@ type SkaldListRow = {
     link: string | null;
     pr: string | null;
     parent: string | null;
+    complexity: number | null;
+    provider: string | null;
   };
 };
 
@@ -56,6 +60,8 @@ export const skaldRead = hatchet.task({
       link: f.link,
       parent: f.parent,
       acceptanceCriteria: acceptanceCriteria.trim(),
+      complexity: f.complexity,
+      provider: f.provider,
     };
   }),
 });

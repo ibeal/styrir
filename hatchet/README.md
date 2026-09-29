@@ -113,6 +113,27 @@ restate them. Styrir's part of the contract is narrower:
   exactly as before; a handoff's `threads`/`thread_url` fields (PR-thread bookkeeping the
   builder/reviewer own directly on the forge) are not read here.
 
+## Model resolution
+
+`sandbox-run` resolves a model before every gardr run and passes it explicitly with
+`--model`; the spec's own pinned model is never used. Order:
+
+```
+tier     = ticket.complexity ?? repos.<slug>.defaultComplexity[status] ?? models.defaultComplexity[status]
+provider = ticket.provider   ?? models.defaultProvider
+model    = models.tiers[provider][tier]
+```
+
+`status` is `building` for a build-phase run, `reviewing` for a review-phase run. `tiers` is 4
+model strings per provider, indexed 0 (cheapest/fastest) to 3 (strongest). A missing tier, an
+unknown provider, or a status with no default (no ticket value, no repo override, no global
+default) fails the run with a `NonRetryableError` naming the missing key — it never falls back to
+whatever model the gardr spec pins. Each sandbox run logs the resolved `tier`/`provider`/`model`
+to the ticket once, before starting gardr.
+
+`styrir.config.json`'s top-level `models` block sets the defaults; a repo entry's own
+`defaultComplexity` overrides the global one per status (see `styrir.config.example.json`).
+
 ## Redeploying
 
 Edit, `npm run typecheck`, restart the worker. In-flight durable runs replay from their last

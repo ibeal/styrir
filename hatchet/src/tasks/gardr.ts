@@ -19,13 +19,14 @@ function tail(path: string | undefined, bytes = 1500): string {
 
 export const gardrStart = hatchet.task({
   name: 'gardr-start',
-  fn: logged(async (input: { workspacePath: string; spec: string; kind: 'build' | 'review' }): Promise<{ runId: string }> => {
+  fn: logged(async (input: { workspacePath: string; spec: string; kind: 'build' | 'review'; model: string }): Promise<{ runId: string }> => {
     await runJson('gardr', ['run', 'validate-workspace', input.workspacePath]);
     const preamble = (await run('heimr', ['preamble', input.kind])).stdout.trim();
     const state = await runJson<GardrRunState>('gardr', [
       'run', 'start',
       '--workspace', input.workspacePath,
       '--spec', input.spec,
+      '--model', input.model,
       '--harness-arg', preamble,
     ]);
     return { runId: state.id };

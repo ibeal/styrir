@@ -8,7 +8,8 @@
     "worker": "tsx src/worker.ts",
     "start": "tsx src/cli.ts start",
     "signal": "tsx src/cli.ts signal",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "STYRIR_CONFIG=./styrir.config.example.json tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@hatchet-dev/typescript-sdk": "^1.33.1",
